@@ -1,14 +1,18 @@
 // ── ProofWorkCard ─────────────────────────────────────────────────────
 // One parked finding's proof work: why it is parked, the verifier's plan,
 // each prepared test with its single next action, and the runs that
-// recorded evidence for it. Reusable: the Proof work tab renders one per
-// finding, and the Findings drawer can embed the same card
+// recorded evidence for it. Reusable: the Proof work tab hosts one in each
+// finding's record, and the Findings record embeds the same card
 // (see `proofCardForFinding`).
 //
 // Every mutation is the existing proof-work endpoint, called through
 // `onAction` so the owner refreshes afterwards; reads (audit history) go
 // straight to the API and never refresh the queue. Approval always asks for
 // an explicit confirmation that names the exact hosts and objective.
+//
+// Unsaved input (the prepare form, revoke and release reasons) is the card's
+// own state unless the owner passes `drafts` and `onDraftsChange`: an owner
+// that remounts the card per record holds the drafts itself so they survive.
 
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -35,7 +39,7 @@ import {
 } from "../lib/proofWorkApi";
 import { engagementHref } from "../lib/workspaceRoutes";
 import { TimeStamp } from "./formatting";
-import { SeverityTag, StatusPill, humanizeStatus } from "./ui";
+import { StatusPill, humanizeStatus } from "./ui";
 
 const ROUTE_LABELS: Record<ProofRoute, string> = {
   code: "Local code reproduction in Kali",
@@ -48,10 +52,26 @@ const ROUTE_HINT_LABELS: Record<ProofNextTest["route_hint"], string> = {
   unknown: "Unknown",
 };
 
+/** The prepare form's fields. */
+export type ProofPrepareDraft = { route: ProofRoute; objective: string; hosts: string };
+
+/** The reasons typed for one prepared test. */
+export type ProofReasonDrafts = { revoke: string; release: string };
+
+/** One card's unsaved input, as an owner outside the card holds it. */
+export type ProofCardDrafts = {
+  /** The prepare form's fields while the form is open. */
+  prepare?: ProofPrepareDraft;
+  /** Revoke and release reasons, by proof work id. */
+  reasons?: Record<number, ProofReasonDrafts>;
+};
+
+type DraftUpdate<T> = (update: (current: T) => T) => void;
+
+const NO_REASONS: ProofReasonDrafts = { revoke: "", release: "" };
+
 export type ProofWorkCardProps = {
   engagementKey: string;
-  slug: string;
-  title: string;
   severity?: string;
   // The finding's current park, when it still owes runtime proof.
   owed: ProofOwedEntry | null;
@@ -67,12 +87,16 @@ export type ProofWorkCardProps = {
   actionError?: string | null;
   onDismissActionError?: () => void;
   highlightWorkId?: number;
-  // The Findings drawer already names the finding; it can hide the link.
-  showFindingLink?: boolean;
-  // Inside a finding's record the card can drop its own title, slug and
-  // severity (the record header already shows them) and keep only the state.
-  showFindingHeader?: boolean;
+  // The card's unsaved input, held by the owner. Pass both or neither;
+  // without them the card keeps its input in its own state.
+  drafts?: ProofCardDrafts;
+  onDraftsChange?: DraftUpdate<ProofCardDrafts>;
 };
+
+/** The queue state a finding's proof work shows: its park's, else its latest prepared test's. */
+export function proofCardState(owed: ProofOwedEntry | null, items: ProofWork[]): ProofWorkQueueState | undefined {
+  return owed?.queue_state ?? (items.length ? items[items.length - 1].queue_state : undefined);
+}
 
 export function QueueStatePill({ state }: { state: ProofWorkQueueState | undefined }) {
   if (!state) return null;
@@ -99,6 +123,11 @@ export function NextTestPlan({ nextTest }: { nextTest: ProofNextTest | null | un
   );
 }
 
+/** An empty prepare form on the finding's default route. */
+function newPrepareDraft(owed: ProofOwedEntry): ProofPrepareDraft {
+  return { route: defaultProofRoute(owed), objective: "", hosts: "" };
+}
+
 function PrepareForm({
   engagementKey,
   owed,
@@ -106,6 +135,8 @@ function PrepareForm({
   writesDisabled,
   onAction,
   onDone,
+  draft,
+  onDraftChange,
 }: {
   engagementKey: string;
   owed: ProofOwedEntry;
@@ -113,12 +144,18 @@ function PrepareForm({
   writesDisabled: boolean;
   onAction: ProofWorkCardProps["onAction"];
   onDone: () => void;
+  // The fields as the card's owner holds them; the form's own state without.
+  draft?: ProofPrepareDraft;
+  onDraftChange?: DraftUpdate<ProofPrepareDraft>;
 }) {
   const formId = useId();
   const defaultRoute = defaultProofRoute(owed);
-  const [route, setRoute] = useState<ProofRoute>(defaultRoute);
-  const [objective, setObjective] = useState("");
-  const [hosts, setHosts] = useState("");
+  const [ownFields, setOwnFields] = useState<ProofPrepareDraft>(() => newPrepareDraft(owed));
+  const { route, objective, hosts } = draft ?? ownFields;
+  const setFields = onDraftChange ?? setOwnFields;
+  const setRoute = (next: ProofRoute) => setFields((current) => ({ ...current, route: next }));
+  const setObjective = (next: string) => setFields((current) => ({ ...current, objective: next }));
+  const setHosts = (next: string) => setFields((current) => ({ ...current, hosts: next }));
   const suggestions = owed.suggested_hosts ?? [];
   const chosenHosts = hosts.split(/[\s,]+/).filter(Boolean);
   // A suggestion chip toggles: a second click takes the host back out.
@@ -287,6 +324,8 @@ function WorkItem({
   writesDisabled,
   onAction,
   highlighted,
+  reasons,
+  onReasonsChange,
 }: {
   engagementKey: string;
   work: ProofWork;
@@ -294,9 +333,15 @@ function WorkItem({
   writesDisabled: boolean;
   onAction: ProofWorkCardProps["onAction"];
   highlighted: boolean;
+  // The reasons as the card's owner holds them; the item's own state without.
+  reasons?: ProofReasonDrafts;
+  onReasonsChange?: DraftUpdate<ProofReasonDrafts>;
 }) {
-  const [revokeReason, setRevokeReason] = useState("");
-  const [recoveryReason, setRecoveryReason] = useState("");
+  const [ownReasons, setOwnReasons] = useState<ProofReasonDrafts>(NO_REASONS);
+  const { revoke: revokeReason, release: recoveryReason } = reasons ?? ownReasons;
+  const setReasons = onReasonsChange ?? setOwnReasons;
+  const setRevokeReason = (next: string) => setReasons((current) => ({ ...current, revoke: next }));
+  const setRecoveryReason = (next: string) => setReasons((current) => ({ ...current, release: next }));
   const [history, setHistory] = useState<ProofWorkEvent[] | null>(null);
   const [historyState, setHistoryState] = useState<"idle" | "loading" | "error">("idle");
   const [historyError, setHistoryError] = useState("");
@@ -479,8 +524,6 @@ function WorkItem({
 
 export function ProofWorkCard({
   engagementKey,
-  slug,
-  title,
   severity,
   owed,
   items,
@@ -488,12 +531,33 @@ export function ProofWorkCard({
   writesDisabled = false,
   onAction,
   highlightWorkId,
-  showFindingLink = true,
-  showFindingHeader = true,
   actionError = null,
   onDismissActionError,
+  drafts,
+  onDraftsChange,
 }: ProofWorkCardProps) {
-  const [preparing, setPreparing] = useState(false);
+  const [ownPreparing, setOwnPreparing] = useState(false);
+  const preparing = onDraftsChange ? drafts?.prepare !== undefined : ownPreparing;
+  const setPreparing = (open: boolean) => {
+    if (!onDraftsChange) setOwnPreparing(open);
+    else if (owed) onDraftsChange((current) => ({ ...current, prepare: open ? current.prepare ?? newPrepareDraft(owed) : undefined }));
+  };
+  const workItem = (work: ProofWork) => (
+    <WorkItem
+      key={work.id}
+      engagementKey={engagementKey}
+      work={work}
+      busy={busy}
+      writesDisabled={writesDisabled}
+      onAction={onAction}
+      highlighted={work.id === highlightWorkId}
+      reasons={onDraftsChange ? drafts?.reasons?.[work.id] ?? NO_REASONS : undefined}
+      onReasonsChange={onDraftsChange && ((update) => onDraftsChange((current) => ({
+        ...current,
+        reasons: { ...current.reasons, [work.id]: update(current.reasons?.[work.id] ?? NO_REASONS) },
+      })))}
+    />
+  );
   const errorRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (actionError) errorRef.current?.scrollIntoView?.({ block: "nearest" });
@@ -503,23 +567,13 @@ export function ProofWorkCard({
   const current = items.filter((work) => currentIds.has(work.id));
   const earlier = items.filter((work) => !currentIds.has(work.id));
   const findingAction = owed ? nextFindingAction(owed, current) : "none";
-  const state = owed?.queue_state ?? (items.length ? items[items.length - 1].queue_state : undefined);
-  const findingHref = engagementHref(engagementKey, { tab: "findings", finding: slug });
+  const state = proofCardState(owed, items);
 
   return (
     <section className={`proof-card sev-${severity ?? "unknown"}`} aria-labelledby={headingId}>
       <header className="proof-card-head">
-        {showFindingHeader ? (
-          <div className="proof-card-title">
-            <p className="proof-eyebrow">
-              {severity && <SeverityTag severity={severity} size="sm" />}
-              <span className="proof-slug">{slug}</span>
-            </p>
-            <h3 id={headingId}>
-              {showFindingLink ? <a href={findingHref}>{title}</a> : title}
-            </h3>
-          </div>
-        ) : <h3 id={headingId} className="proof-card-compact-title">Runtime proof</h3>}
+        {/* The record that hosts the card names the finding; the card names its part. */}
+        <h3 id={headingId} className="proof-card-compact-title">Runtime proof</h3>
         <QueueStatePill state={state} />
       </header>
 
@@ -549,6 +603,10 @@ export function ProofWorkCard({
             writesDisabled={writesDisabled}
             onAction={onAction}
             onDone={() => setPreparing(false)}
+            draft={onDraftsChange ? drafts?.prepare : undefined}
+            onDraftChange={onDraftsChange && ((update) => onDraftsChange((current) => (
+              current.prepare ? { ...current, prepare: update(current.prepare) } : current
+            )))}
           />
         ) : (
           <div className="proof-next-actions">
@@ -562,32 +620,12 @@ export function ProofWorkCard({
         )
       )}
 
-      {current.map((work) => (
-        <WorkItem
-          key={work.id}
-          engagementKey={engagementKey}
-          work={work}
-          busy={busy}
-          writesDisabled={writesDisabled}
-          onAction={onAction}
-          highlighted={work.id === highlightWorkId}
-        />
-      ))}
+      {current.map(workItem)}
 
       {earlier.length > 0 && (
         <details className="proof-earlier" open={earlier.some((work) => work.id === highlightWorkId) || !owed}>
           <summary>{owed ? `Earlier preparations (${earlier.length})` : `Proof work (${earlier.length})`}</summary>
-          {earlier.map((work) => (
-            <WorkItem
-              key={work.id}
-              engagementKey={engagementKey}
-              work={work}
-              busy={busy}
-              writesDisabled={writesDisabled}
-              onAction={onAction}
-              highlighted={work.id === highlightWorkId}
-            />
-          ))}
+          {earlier.map(workItem)}
         </details>
       )}
 

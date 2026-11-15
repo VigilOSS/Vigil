@@ -91,6 +91,22 @@ describe("App engagement loading", () => {
     expect(await screen.findByText("Tab commands work none command 77")).toBeTruthy();
   });
 
+  it("passes proof-record, activity-entry and submission deep links to the engagement page", async () => {
+    vi.mocked(EngagementPage).mockImplementation(({ initialTab, initialProofSlug, initialActivityEntry, initialSubmissionSlug, initialDrawerTab }) => (
+      <div>Tab {initialTab} proof {initialProofSlug ?? "none"} entry {initialActivityEntry ?? "none"} submission {initialSubmissionSlug ?? "none"} section {initialDrawerTab ?? "none"}</div>
+    ));
+    window.location.hash = "#/engagements/demo?tab=proof&proof=VA-001";
+    render(<App />);
+    expect(await screen.findByText("Tab proof proof VA-001 entry none submission none section none")).toBeTruthy();
+    window.location.hash = "#/engagements/demo?tab=activity&entry=audit:3&dtab=metadata";
+    expect(await screen.findByText("Tab activity proof none entry audit:3 submission none section metadata")).toBeTruthy();
+    window.location.hash = "#/engagements/demo?tab=submissions&submission=VA-002&dtab=versions";
+    expect(await screen.findByText("Tab submissions proof none entry none submission VA-002 section versions")).toBeTruthy();
+    // A parameter with no value names no record.
+    window.location.hash = "#/engagements/demo?tab=activity&entry=";
+    expect(await screen.findByText("Tab activity proof none entry none submission none section none")).toBeTruthy();
+  });
+
   it("does not turn an unsafe numeric deep link into a different rounded record ID", async () => {
     window.location.hash = "#/engagements/demo?tab=http&request=9007199254740993";
     render(<App />);

@@ -1,14 +1,12 @@
-// Row, dispatch card, and burst renderers for the Activity view. Every entry
-// is one line until opened; the stored fields stay one disclosure away.
+// Row, dispatch card, and burst renderers for the Activity list. Every entry
+// is one line: a row opens its record (ActivityRecord.tsx), a dispatch card or
+// burst expands in place to its member rows.
 
 import type { ReactNode } from "react";
 
-import type { ActivityEntity, ActivityItem } from "../../lib/activityApi";
+import type { ActivityEntity } from "../../lib/activityApi";
 import { formatAbsoluteTime, formatRelativeTime, parseServerTime } from "../../lib/serverTime";
 import { engagementHref } from "../../lib/workspaceRoutes";
-import { KV, KVTime } from "../drawer/DrawerKit";
-import { CopyInline } from "../formatting";
-import { JsonView } from "../JsonView";
 import { StatusPill } from "../ui";
 import {
   dispatchSpanText,
@@ -24,13 +22,16 @@ import {
 export type EntryUi = {
   engagementKey: string;
   categoryLabels: Map<string, string>;
+  /** The dispatch cards and bursts showing their member rows. */
   expanded: ReadonlySet<string>;
-  /** Opens `id`, or closes it and every alias (a burst's member keys). */
+  /** Expands the group `id`, or collapses it and every alias (a burst's member keys). */
   toggle: (id: string, aliases?: readonly string[]) => void;
+  /** Opens a row's record; `invoker` is the row used, where focus returns. */
+  open: (id: string, invoker: HTMLElement) => void;
   fresh: ReadonlySet<string>;
 };
 
-const ACTOR_KIND_LABEL = { operator: "Operator", agent: "Agent", system: "System" } as const;
+export const ACTOR_KIND_LABEL = { operator: "Operator", agent: "Agent", system: "System" } as const;
 const ENTITY_CHIP_LIMIT = 4;
 
 /** Clock time inside a day group; the full UTC instant and age are on hover and in the label. */
@@ -58,7 +59,7 @@ function ClockRange({ newest, oldest }: { newest: string; oldest: string }) {
   );
 }
 
-function ActorTag({ name, kind }: { name: string; kind: keyof typeof ACTOR_KIND_LABEL }) {
+export function ActorTag({ name, kind }: { name: string; kind: keyof typeof ACTOR_KIND_LABEL }) {
   return (
     <span className={`activity-actor actor-${kind}`} title={`${ACTOR_KIND_LABEL[kind]}: ${name || "unnamed"}`}>
       <span className="activity-actor-kind">{ACTOR_KIND_LABEL[kind]}</span>
@@ -111,109 +112,24 @@ export function EntityChips({ engagementKey, entities, limit = ENTITY_CHIP_LIMIT
   );
 }
 
-/** Entities no view opens, each with the reason, so the detail says why instead of only a hover. */
-function UnlinkedEntities({ engagementKey, entities }: { engagementKey: string; entities: ActivityEntity[] }) {
-  const unlinked = entities.filter((entity) => entityHref(engagementKey, entity) === null);
-  if (!unlinked.length) return null;
-  return (
-    <ul className="activity-unlinked" aria-label="Linked records that cannot be opened">
-      {unlinked.map((entity) => (
-        <li key={`${entity.type}:${entity.key}`}>
-          <span className="mono">{entity.label}</span>
-          {" — "}
-          <span className="activity-unlinked-reason">{entityUnlinkedReason(entity)}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function Verbatim({ label, value, entryId }: { label: string; value: unknown; entryId: string }) {
-  const text = typeof value === "string" ? value : "";
-  if (!text) return null;
-  return (
-    <div className="activity-verbatim">
-      <div className="activity-verbatim-head">
-        <span className="k">{label}</span>
-        <CopyInline text={text} ariaLabel={`Copy ${label.toLowerCase()} for ${entryId}`}>copy</CopyInline>
-      </div>
-      <pre>{text}</pre>
-    </div>
-  );
-}
-
-function RowDetail({ item, ui, id }: { item: ActivityItem; ui: EntryUi; id: string }) {
-  const detail = item.detail;
-  const metadata = detail.metadata;
-  const hasMetadata = Boolean(metadata && typeof metadata === "object" && Object.keys(metadata).length);
-  const dispatch = item.dispatch;
-  return (
-    <div className="activity-detail" id={id}>
-      <p className="activity-detail-summary">{item.summary}</p>
-      <div className="activity-kv-grid">
-        <KVTime k="Occurred" v={item.occurred_at} precision="millisecond" />
-        <KVTime k="Recorded" v={typeof detail.recorded_at === "string" ? detail.recorded_at : null} />
-        <KV k="Actor" v={`${item.actor.name || "unnamed"} · ${ACTOR_KIND_LABEL[item.actor.kind].toLowerCase()}${typeof detail.actor_kind === "string" && detail.actor_kind && detail.actor_kind !== item.actor.kind ? ` (stored as ${detail.actor_kind})` : ""}`} />
-        <KV k="Category" v={ui.categoryLabels.get(item.category) ?? item.category} />
-        <KV k={item.source === "audit" ? "Audit title" : "Event type"} v={item.kind} mono />
-        <KV k="Source" v={item.source === "audit" ? `Audit log entry #${item.source_id}` : `Structured event #${item.source_id}`} />
-        {item.source === "event" && <KV k="Phase" v={detail.phase} />}
-        {item.source === "event" && <KV k="Task" v={detail.task_name} mono />}
-        {dispatch && (
-          <div className="kv">
-            <p className="k">Dispatch</p>
-            <p className="v">
-              <span className="mono">{dispatch.agent_id}</span>{dispatch.role ? ` · ${dispatch.role}` : ""}
-              {dispatch.run_id ? <> · <a href={engagementHref(ui.engagementKey, { tab: "runs", run: dispatch.run_id })}>Run #{dispatch.run_id}</a></> : null}
-            </p>
-          </div>
-        )}
-      </div>
-      {item.entities.length > 0 && (
-        <div className="activity-detail-entities">
-          <span className="k">Linked</span>
-          <EntityChips engagementKey={ui.engagementKey} entities={item.entities} limit={item.entities.length} />
-          <UnlinkedEntities engagementKey={ui.engagementKey} entities={item.entities} />
-        </div>
-      )}
-      <Verbatim label="Action" value={detail.action} entryId={item.id} />
-      <Verbatim label="Result" value={detail.result} entryId={item.id} />
-      <Verbatim label="Artifact reference" value={detail.artifact_ref} entryId={item.id} />
-      <Verbatim label="Body" value={detail.body_markdown} entryId={item.id} />
-      {item.source === "event" && <Verbatim label="Stored summary" value={detail.summary} entryId={item.id} />}
-      {hasMetadata && (
-        <details className="activity-metadata">
-          <summary>Metadata</summary>
-          <JsonView value={metadata} label="Stored metadata" />
-        </details>
-      )}
-    </div>
-  );
-}
-
 function RowView({ entry, ui, compact = false }: { entry: RowEntry; ui: EntryUi; compact?: boolean }) {
   const { item } = entry;
-  const open = ui.expanded.has(entry.id);
-  const detailId = `activity-detail-${entry.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
   return (
-    <li className={`activity-entry activity-row cat-${item.category}${ui.fresh.has(item.id) ? " is-new" : ""}${open ? " is-open" : ""}`}>
+    <li className={`activity-entry activity-row cat-${item.category}${ui.fresh.has(item.id) ? " is-new" : ""}`}>
       <div className="activity-line">
         <ClockTime value={item.occurred_at} />
         {!compact && <ActorTag name={item.actor.name} kind={item.actor.kind} />}
         <button
           type="button"
           className="activity-summary"
-          aria-expanded={open}
-          aria-controls={detailId}
-          onClick={() => ui.toggle(entry.id)}
+          data-record-key={item.id}
+          onClick={(event) => ui.open(item.id, event.currentTarget)}
           title={item.summary}
         >
-          <span className="activity-caret" aria-hidden="true" />
           <span className="activity-summary-text">{item.summary}</span>
         </button>
         <EntityChips engagementKey={ui.engagementKey} entities={item.entities} />
       </div>
-      {open && <RowDetail item={item} ui={ui} id={detailId} />}
     </li>
   );
 }

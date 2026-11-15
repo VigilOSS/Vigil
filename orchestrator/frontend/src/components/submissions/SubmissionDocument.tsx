@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -7,10 +7,11 @@ import {
   FileArchive,
   Lock,
   RefreshCcw,
+  X,
 } from "lucide-react";
 
 import { submissionVersionDownloadUrl } from "../../lib/api";
-import type { SubmissionPendingVersion } from "../../lib/api";
+import type { SubmissionPendingVersion, SubmissionRecoveryResult } from "../../lib/api";
 import type {
   SubmissionAttachmentRow,
   SubmissionBlockerItem,
@@ -23,8 +24,9 @@ import { CopyChip } from "../drawer/DrawerKit";
 import { TimeStamp, formatBytes } from "../formatting";
 import { MarkdownBlock } from "../Markdown";
 import { Skeleton, SlowLoadHint } from "../Skeletons";
-import { EmptyState, StatusPill } from "../ui";
+import { StatusPill } from "../ui";
 import { FindingRecordHeader } from "../FindingRecordHeader";
+import { RecordBody, RecordCopyLinkButton, RecordHeader, RecordTabs, type RecordTab } from "../record/RecordView";
 import { operatorAuthorityOf } from "../../lib/findingWorkflow";
 import { AttachmentPicker, type AttachmentMeta } from "./AttachmentPicker";
 import {
@@ -40,9 +42,53 @@ import { QueuePill, SubmissionTime } from "./SubmissionQueue";
 /** The document's sections (`dtab` in the address). */
 export const DOCUMENT_TABS = ["body", "notes", "package", "versions", "readiness"] as const;
 export type DocumentTab = (typeof DOCUMENT_TABS)[number];
-type ViewMode = "rendered" | "raw";
+export type ViewMode = "rendered" | "raw";
 
-export function PendingVersionRows({ versions }: { versions: SubmissionPendingVersion[] }) {
+/** The engagement-wide recovery of staged exports; it sits in the page header and in a record's Versions section. */
+export function RecoverExportsButton({ count, recovering, disabled, onRecover }: {
+  count: number;
+  recovering: boolean;
+  disabled: boolean;
+  onRecover: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="ui-button subm-recover"
+      onClick={onRecover}
+      disabled={disabled}
+      title="Verify and complete staged exports (writes only completed versions)"
+    >
+      <RefreshCcw size={13} aria-hidden="true" />
+      {recovering ? "Recovering…" : `Recover ${count} staged export${count === 1 ? "" : "s"}`}
+    </button>
+  );
+}
+
+/** What a recovery could not finish: the exports that failed and staging paths no version owns. */
+export function RecoveryIssues({ issues, onDismiss }: { issues: SubmissionRecoveryResult; onDismiss: () => void }) {
+  return (
+    <div className="subm-callout is-danger subm-recovery" role="alert">
+      <div className="subm-recovery-head">
+        <strong>Recovery incomplete.</strong>
+        <button type="button" className="icon-btn" aria-label="Dismiss recovery details" onClick={onDismiss}>
+          <X size={14} aria-hidden="true" />
+        </button>
+      </div>
+      {issues.failed_versions.length > 0 && <PendingVersionRows versions={issues.failed_versions} />}
+      {issues.orphaned_staging_paths.length > 0 && (
+        <div>
+          <p>Orphaned staging path{issues.orphaned_staging_paths.length === 1 ? "" : "s"}:</p>
+          <ul>
+            {issues.orphaned_staging_paths.map((path) => <li key={path}><code>{path}</code></li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingVersionRows({ versions }: { versions: SubmissionPendingVersion[] }) {
   return (
     <ul className="subm-pending-list">
       {versions.map((version) => (
@@ -102,7 +148,7 @@ function MarkdownView({ text, mode }: { text: string; mode: ViewMode }) {
   );
 }
 
-// The single primary action, always in the card header: export, download the
+// The single primary action, always in the record header: export, download the
 // version that already captured this exact selection, or explain the block.
 function PrimaryAction({
   engagementKey,
@@ -187,8 +233,11 @@ function PrimaryAction({
   );
 }
 
+/** One finding's submission record: the shared finding header, its sections and the open section. */
 export function SubmissionDocument({
   engagementKey,
+  slug,
+  titleId,
   row,
   detail,
   detailLoading,
@@ -198,20 +247,23 @@ export function SubmissionDocument({
   selection,
   meta,
   tab,
+  mode,
+  showWholeWorkspace,
   locked,
   exporting,
   previewOutdated,
-  outsideList,
-  outsideListMore = null,
-  loadingMoreFindings = false,
-  onLoadMoreFindings,
-  requestedSlug = "",
-  emptyList,
+  stagingCount,
+  recovering,
+  recoveryIssues,
   loadingMoreVersions,
   loadingMorePending,
   onTab,
+  onMode,
+  onShowWholeWorkspace,
   onRefresh,
   onExport,
+  onRecover,
+  onDismissRecoveryIssues,
   onToggleAttachment,
   onReplaceAttachments,
   onAttachmentRows,
@@ -219,6 +271,10 @@ export function SubmissionDocument({
   onLoadMorePending,
 }: {
   engagementKey: string;
+  /** The open finding, known before any of its data is. */
+  slug: string;
+  titleId: string;
+  /** The finding's queue row; null when the list as loaded does not hold it. */
   row: SubmissionDeskRow | null;
   detail: SubmissionDeskDetail | null;
   detailLoading: boolean;
@@ -228,24 +284,27 @@ export function SubmissionDocument({
   selection: number[];
   meta: Map<number, AttachmentMeta>;
   tab: DocumentTab;
+  /** Rendered or raw Markdown, for the body and the operator notes. */
+  mode: ViewMode;
+  /** Operator notes show the whole of submission.md, not only its operator section. */
+  showWholeWorkspace: boolean;
   locked: boolean;
   exporting: boolean;
   previewOutdated: boolean;
-  /** The open finding is not in the queue as filtered: the filter's label. */
-  outsideList?: string | null;
-  /** The list holds more findings than are loaded, so "not in the list" may only mean "further down". */
-  outsideListMore?: { loaded: number; total: number } | null;
-  loadingMoreFindings?: boolean;
-  onLoadMoreFindings?: () => void;
-  /** The finding the selection (or the URL) names, known before any of its data is. */
-  requestedSlug?: string;
-  /** Why the queue holds no findings: none recorded yet, or none under these filters. */
-  emptyList?: "nothing-recorded" | "filtered" | null;
+  /** Staged exports across the engagement that recovery can complete. */
+  stagingCount: number;
+  recovering: boolean;
+  /** What the last recovery could not finish. */
+  recoveryIssues: SubmissionRecoveryResult | null;
   loadingMoreVersions: boolean;
   loadingMorePending: boolean;
   onTab: (tab: DocumentTab) => void;
+  onMode: (mode: ViewMode) => void;
+  onShowWholeWorkspace: (shown: boolean) => void;
   onRefresh: () => void;
   onExport: () => void;
+  onRecover: () => void;
+  onDismissRecoveryIssues: () => void;
   onToggleAttachment: (id: number) => void;
   onReplaceAttachments: (ids: number[]) => void;
   onAttachmentRows: (rows: SubmissionAttachmentRow[]) => void;
@@ -253,9 +312,32 @@ export function SubmissionDocument({
   onLoadMorePending: () => void;
 }) {
   const { toast } = useToast();
-  const [mode, setMode] = useState<ViewMode>("rendered");
-  const [showWholeWorkspace, setShowWholeWorkspace] = useState(false);
-  const slug = detail?.finding.slug ?? row?.slug ?? "";
+
+  if (!row && !detail) {
+    // The named finding has no row and no detail yet: say whether it is loading or could not be read.
+    return (
+      <>
+        <RecordHeader
+          id={slug}
+          copyId={slug}
+          title={`Submission for ${slug}`}
+          titleId={titleId}
+          actions={<RecordCopyLinkButton noun="submission" />}
+        />
+        <RecordBody busy={detailLoading}>
+          {detailError ? (
+            <p className="error-text" role="alert">
+              Submission for {slug} unavailable: {detailError}{" "}
+              <button type="button" className="qa-btn" onClick={onRefresh} disabled={detailLoading}>Retry</button>
+            </p>
+          ) : (
+            <p className="meta-text" role="status">Loading {slug}…</p>
+          )}
+        </RecordBody>
+      </>
+    );
+  }
+
   const title = row?.title ?? detail?.finding.title ?? "";
   const severity = row?.severity ?? detail?.finding.severity ?? "info";
   const submissionStatus = row?.submission_status ?? detail?.finding.submission_status ?? "none";
@@ -265,76 +347,26 @@ export function SubmissionDocument({
   const platform = detail?.platform ?? row?.default_platform ?? null;
   const latest = detail?.latest_version ?? null;
   const showingStale = detailLoading && detail != null;
-  const blockerCount = readiness?.blockers.length ?? 0;
+  const pendingCount = detail?.pending_version_count ?? 0;
   // A merged or false-positive finding is in no submission list, whatever the filters.
   const retired = detail?.finding.workflow_status === "merged" ? "merged"
     : detail?.finding.workflow_status === "false_positive" ? "a false positive"
     : null;
 
-  if (!slug && requestedSlug && (detailError || detailLoading)) {
-    // The named finding has no row and no detail yet: say whether it is loading or could not be read.
-    return (
-      <section className="subm-card panel subm-card-empty" aria-label={`Submission ${requestedSlug}`}>
-        {detailError ? (
-          <p className="error-text" role="alert">
-            Submission for {requestedSlug} unavailable: {detailError}{" "}
-            <button type="button" className="qa-btn" onClick={onRefresh} disabled={detailLoading}>Retry</button>
-          </p>
-        ) : (
-          <p className="meta-text" role="status">Loading {requestedSlug}…</p>
-        )}
-      </section>
-    );
-  }
-
-  if (!slug) {
-    return (
-      <section className="subm-card panel subm-card-empty" aria-label="Submission">
-        <EmptyState variant="empty" compact title="No finding selected.">
-          {emptyList === "nothing-recorded"
-            ? "This engagement has no findings to write up yet."
-            : emptyList === "filtered"
-              ? "The list is empty, so there is nothing to open. Change the filters to see findings."
-              : "Choose a finding from the list to review its submission body, package, versions and readiness."}
-        </EmptyState>
-      </section>
-    );
-  }
-
-  const tabs: Array<{ id: DocumentTab; label: ReactNode }> = [
+  const workspace = detail?.workspace;
+  // Section tabs carry a count only: the attachments selected, the immutable
+  // versions, and the blockers while any stand.
+  const tabs: RecordTab<DocumentTab>[] = [
     { id: "body", label: "Submission body" },
     { id: "notes", label: "Operator notes" },
-    {
-      id: "package",
-      label: <>Package <span className="subm-tab-count">{selection.length}</span></>,
-    },
-    {
-      id: "versions",
-      label: (
-        <>
-          Versions <span className="subm-tab-count">{detail?.versions_page.total ?? row?.version_count ?? 0}</span>
-          {(detail?.pending_version_count ?? 0) > 0 && (
-            <span className="subm-tab-count is-danger">{detail?.pending_version_count} incomplete</span>
-          )}
-        </>
-      ),
-    },
+    { id: "package", label: "Package", count: selection.length },
+    { id: "versions", label: "Versions", count: detail?.versions_page.total ?? row?.version_count ?? 0 },
     {
       id: "readiness",
-      label: (
-        <>
-          Readiness{" "}
-          {readiness && !checkingReadiness && (
-            <span className={`subm-tab-count ${readiness.final_ready ? "is-ok" : "is-warn"}`}>
-              {readiness.final_ready ? "ready" : blockerCount}
-            </span>
-          )}
-        </>
-      ),
+      label: "Readiness",
+      count: readiness && !checkingReadiness && !readiness.final_ready ? readiness.blockers.length : undefined,
     },
   ];
-
-  const workspace = detail?.workspace;
   const operatorNotes = workspace?.present ? operatorSection(workspace.markdown) : null;
   const renderCommand = `vigil assess export submission ${slug} --platform ${platform ?? "<bugcrowd|hackerone|direct|ghsa>"} --draft`;
 
@@ -378,7 +410,6 @@ export function SubmissionDocument({
       body = (
         <>
           <div className="subm-pane-toolbar">
-            <ViewToggle mode={mode} onChange={setMode} />
             <span className="subm-muted">
               <code>submission-body.md</code> — exactly what the program receives
             </span>
@@ -400,7 +431,6 @@ export function SubmissionDocument({
       body = (
         <>
           <div className="subm-pane-toolbar">
-            <ViewToggle mode={mode} onChange={setMode} />
             <span className="subm-muted">
               Internal reference from <code>submission.md</code> — never part of the export
             </span>
@@ -408,7 +438,7 @@ export function SubmissionDocument({
               <input
                 type="checkbox"
                 checked={showWholeWorkspace}
-                onChange={(event) => setShowWholeWorkspace(event.target.checked)}
+                onChange={(event) => onShowWholeWorkspace(event.target.checked)}
               />
               Show all of submission.md
             </label>
@@ -436,6 +466,7 @@ export function SubmissionDocument({
   } else if (tab === "versions") {
     body = (
       <div className="subm-versions">
+        {recoveryIssues && <RecoveryIssues issues={recoveryIssues} onDismiss={onDismissRecoveryIssues} />}
         {detail.pending_versions.length > 0 && (
           <section className="subm-callout is-danger" aria-label="Incomplete export reservations">
             <h4>
@@ -443,6 +474,11 @@ export function SubmissionDocument({
               {detail.pending_version_count === 1 ? "" : "s"}
             </h4>
             <p>Staged exports can be completed with “Recover staged exports”; failed ones keep their reason.</p>
+            {stagingCount > 0 && (
+              <div>
+                <RecoverExportsButton count={stagingCount} recovering={recovering} disabled={locked} onRecover={onRecover} />
+              </div>
+            )}
             <PendingVersionRows versions={detail.pending_versions} />
             {detail.pending_versions_page.has_more && (
               <button type="button" className="pager-btn" onClick={onLoadMorePending} disabled={loadingMorePending}>
@@ -625,19 +661,24 @@ export function SubmissionDocument({
     );
   }
 
+  const proseSection = (tab === "body" || tab === "notes") && Boolean(workspace?.present);
   return (
-    <section className="subm-card panel" aria-label={`Submission ${slug}`} aria-busy={detailLoading}>
-      <header className="subm-card-head">
-        <FindingRecordHeader engagementKey={engagementKey} slug={slug} title={title}
-          titleId="submission-finding-title" severity={severity}
-          workflow={row?.workflow_status ?? detail?.finding.workflow_status}
-          verification={row?.verification_status ?? detail?.finding.verification_status}
-          // The disclosure package is the handoff to an external program, so
-          // this is the last place a verdict taken on the operator's own
-          // authority may look dispatch-verified.
-          operatorAuthority={operatorAuthorityOf(detail?.finding)}
-          submission={submissionStatus} workspace="submissions" section={tab}
-          actions={<div className="subm-card-action">
+    <>
+      <FindingRecordHeader engagementKey={engagementKey} slug={slug} title={title}
+        titleId={titleId} severity={severity}
+        workflow={row?.workflow_status ?? detail?.finding.workflow_status}
+        verification={row?.verification_status ?? detail?.finding.verification_status}
+        // The disclosure package is the handoff to an external program, so
+        // this is the last place a verdict taken on the operator's own
+        // authority may look dispatch-verified.
+        operatorAuthority={operatorAuthorityOf(detail?.finding)}
+        submission={submissionStatus} workspace="submissions" section={tab}
+        pills={row && <span className="finding-status-axis" role="group" aria-label="Package readiness">Package <QueuePill row={row} size="md" /></span>}
+        dates={row ? [{ label: "Finding changed", value: row.updated_at }] : undefined}
+        datesLabel="Submission dates"
+        actions={<>
+          <RecordCopyLinkButton noun="submission" />
+          <div className="subm-record-action">
             <PrimaryAction
               engagementKey={engagementKey}
               detail={detail}
@@ -650,10 +691,10 @@ export function SubmissionDocument({
               onShowRenderGuide={() => onTab("body")}
             />
             <span className="subm-action-note">Exporting never submits anything.</span>
-          </div>}
-        />
-        <div className="subm-card-meta">
-          {row && <span className="finding-status-axis" role="group" aria-label="Package readiness">Package <QueuePill row={row} size="md" /></span>}
+          </div>
+        </>}
+      >
+        <div className="subm-record-meta">
           {latest ? (
             <span className={`subm-chip ${latest.stale ? "is-warn" : ""}`}>
               Latest v{latest.version_number}
@@ -673,34 +714,20 @@ export function SubmissionDocument({
               ? <a href={externalHref} target="_blank" rel="noopener noreferrer" className="subm-meta-link">Platform report <ExternalLink size={12} aria-hidden="true" /></a>
               : <code className="subm-chip" title="Not an http(s) URL; shown as text">{submissionUrl}</code>
           )}
-          {row?.updated_at && (
-            <span className="subm-muted">Finding changed <SubmissionTime value={row.updated_at} /></span>
-          )}
         </div>
-        {outsideList && (
+        {retired && (
           <div className="subm-header-notice is-info" role="status">
-            {retired ? (
-              <span>
-                {slug} is {retired}, so no submission list includes it. It stays open here; pick another finding.
-              </span>
-            ) : outsideListMore ? (
-              <>
-                <span>
-                  {slug} is not among the {outsideListMore.loaded.toLocaleString()} of {outsideListMore.total.toLocaleString()} findings
-                  loaded in this list ({outsideList}); it may be further down. It stays open here.
-                </span>
-                {onLoadMoreFindings && (
-                  <button type="button" className="qa-btn" onClick={onLoadMoreFindings} disabled={loadingMoreFindings}>
-                    {loadingMoreFindings ? "Loading…" : "Load more findings"}
-                  </button>
-                )}
-              </>
-            ) : (
-              <span>
-                {slug} is not in this list ({outsideList}): the filters exclude it now. It stays open here; pick another
-                finding or change the filters.
-              </span>
-            )}
+            <span>{slug} is {retired}, so no submission list includes it.</span>
+          </div>
+        )}
+        {pendingCount > 0 && (
+          <div className="subm-header-notice is-error" role="status">
+            <AlertTriangle size={14} aria-hidden="true" />
+            <span>
+              {pendingCount.toLocaleString()} incomplete export{pendingCount === 1 ? "" : "s"}: staged or failed, and not among this
+              finding&apos;s versions.
+            </span>
+            {tab !== "versions" && <button type="button" className="qa-btn" onClick={() => onTab("versions")}>Show in Versions</button>}
           </div>
         )}
         {previewOutdated && (
@@ -718,33 +745,20 @@ export function SubmissionDocument({
             <button type="button" className="qa-btn" onClick={onRefresh}>Retry</button>
           </div>
         )}
-        <div className="subm-tabs" role="tablist" aria-label="Submission sections">
-          {tabs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              id={`subm-tab-${item.id}`}
-              aria-selected={tab === item.id}
-              aria-controls="subm-tabpanel"
-              className={tab === item.id ? "is-active" : ""}
-              onClick={() => onTab(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
+      </FindingRecordHeader>
+      <RecordTabs
+        tabs={tabs}
+        active={tab}
+        onChange={onTab}
+        label="Submission sections"
+        trailing={proseSection ? <ViewToggle mode={mode} onChange={onMode} /> : undefined}
+      />
+      <RecordBody busy={detailLoading}>
+        <div className={`subm-section${showingStale ? " is-reloading" : ""}`}>
+          <SlowLoadHint active={showingStale} what={`the latest state for ${slug}`} />
+          {body}
         </div>
-      </header>
-      <div
-        id="subm-tabpanel"
-        role="tabpanel"
-        aria-labelledby={`subm-tab-${tab}`}
-        className={`subm-card-body ${showingStale ? "is-reloading" : ""}`}
-        tabIndex={0}
-      >
-        <SlowLoadHint active={showingStale} what={`the latest state for ${slug}`} />
-        {body}
-      </div>
-    </section>
+      </RecordBody>
+    </>
   );
 }

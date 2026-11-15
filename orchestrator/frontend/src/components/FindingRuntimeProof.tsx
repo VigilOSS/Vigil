@@ -107,8 +107,6 @@ export function FindingRuntimeProof({ engagementKey, slug, refreshVersion = 0 }:
       {card ? (
         <ProofWorkCard
           engagementKey={engagementKey}
-          slug={card.slug}
-          title={card.title}
           severity={card.severity}
           owed={card.owed}
           items={card.items}
@@ -117,8 +115,6 @@ export function FindingRuntimeProof({ engagementKey, slug, refreshVersion = 0 }:
           onAction={act}
           actionError={writeError}
           onDismissActionError={() => setWriteError(null)}
-          showFindingLink={false}
-          showFindingHeader={false}
         />
       ) : (
         <p className="meta-text">This finding is not in the proof queue yet. <a href={proofHref}>Open proof work</a></p>

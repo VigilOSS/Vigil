@@ -1,18 +1,21 @@
 // ── SubmissionsTab ────────────────────────────────────────────────────
-// The submission desk: a server-filtered queue of findings beside the one
-// finding's submission document (body, notes, package, versions, readiness)
-// with its single primary action pinned in the document header. Export is
-// the only irreversible action and always goes through ExportDialog.
+// The submission desk: a server-filtered queue of findings. Opening a finding
+// replaces the queue with the shared record view on its submission document
+// (body, notes, package, versions, readiness), whose header carries the single
+// primary action; Back, Escape and browser Back return to the queue. Export
+// is the only irreversible action and always goes through ExportDialog.
 //
 // The shared "Needs attention" scope is the backend's "To do" listing; a
-// state chip narrows it (a chip outside the scope widens it). The selected
-// finding and document section live in the address (`submission=`, `dtab=`)
-// and, with the filters, survive leaving the tab (sessionStorage).
+// state chip narrows it (a chip outside the scope widens it). The open
+// finding and its section live in the address (`submission=`, `dtab=`); the
+// filters and the loaded depth survive leaving the tab (sessionStorage).
+// Attachment selections the operator changed are kept per finding for the
+// visit, so stepping away from a record and back does not drop them.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCcw, Search, X } from "lucide-react";
+import { Search, X } from "lucide-react";
 
-import { exportSubmissionVersion, recoverSubmissionExports } from "../lib/api";
+import { ApiError, exportSubmissionVersion, recoverSubmissionExports } from "../lib/api";
 import type { SubmissionRecoveryResult } from "../lib/api";
 import {
   SUBMISSION_MAX_PAGE_SIZE,
@@ -31,7 +34,6 @@ import type {
 } from "../lib/submissionsApi";
 import { useToast } from "../contexts/ToastContext";
 import { createCoalescedRunner } from "../lib/coalesce";
-import { useViewportPane } from "../lib/viewportPane";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type { AttachmentMeta } from "./submissions/AttachmentPicker";
 import { ExportDialog } from "./submissions/ExportDialog";
@@ -50,7 +52,16 @@ import {
   sortedIds,
   type DeskView,
 } from "./submissions/model";
-import { DOCUMENT_TABS, PendingVersionRows, SubmissionDocument, type DocumentTab } from "./submissions/SubmissionDocument";
+import {
+  DOCUMENT_TABS,
+  RecoverExportsButton,
+  RecoveryIssues,
+  SubmissionDocument,
+  type DocumentTab,
+  type ViewMode,
+} from "./submissions/SubmissionDocument";
+import { RecordView, useResultsScrollMemory, type RecordNavigation } from "./record/RecordView";
+import { useWindowedNavigation } from "./record/recordNavigation";
 import { SubmissionQueue } from "./submissions/SubmissionQueue";
 import {
   ClearFiltersButton,
@@ -66,9 +77,9 @@ import "../styles/submissions.css";
 type SubmissionsTabProps = {
   engagementKey: string;
   refreshVersion?: number;
-  /** `submission=` in the URL: the finding whose submission document is open. */
+  /** `submission=` in the URL: the finding whose submission record is open. */
   initialSubmissionSlug?: string;
-  /** `dtab=` in the URL: the open document tab. */
+  /** `dtab=` in the URL: the open record's section (the body is the default). */
   initialDrawerTab?: string;
   /** Reports the engagement's "to do" count from each listing read, for the rail badge while open. */
   onToDoCount?: (count: number) => void;
@@ -78,8 +89,7 @@ type SubmissionsTabProps = {
 
 const SEARCH_DEBOUNCE_MS = 250;
 const READINESS_DEBOUNCE_MS = 350;
-// Pane height floor: below this the page scrolls and the panes stay sticky.
-const MIN_PANE_HEIGHT = 300;
+const RECORD_TITLE_ID = "submission-finding-title";
 
 const viewKey = (engagementKey: string) => `submissions.queue.${engagementKey}`;
 
@@ -168,30 +178,46 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
   const [listingLoading, setListingLoading] = useState(true);
   const [listingError, setListingError] = useState("");
   const [loadingMoreFindings, setLoadingMoreFindings] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const loadingMoreRef = useRef(false);
   const listingRef = useRef<SubmissionDeskListing | null>(null);
   listingRef.current = listing;
 
-  // ── Selection + detail ──────────────────────────────────────────────
-  // A link names the finding; otherwise the one open when the tab was left.
-  const [selectedSlug, setSelectedSlug] = useState(initialSubmissionSlug ?? saved.slug);
-  const selectedSlugRef = useRef(selectedSlug);
-  selectedSlugRef.current = selectedSlug;
-  const selectedRowRef = useRef<SubmissionDeskRow | null>(null);
-  // Set by an operator filter change: the next listing moves the selection
-  // onto it when the open finding falls outside.
-  const followFilterRef = useRef(false);
+  // ── Open record + detail ────────────────────────────────────────────
+  // The finding whose record is open; null while the queue shows.
+  const [openSlug, setOpenSlug] = useState<string | null>(initialSubmissionSlug || null);
+  const openSlugRef = useRef(openSlug);
+  openSlugRef.current = openSlug;
+  // The open finding's last known queue row, kept when a refresh drops it from the list.
+  const openRowRef = useRef<SubmissionDeskRow | null>(null);
+  // The `submission=` and `dtab=` values the open record last followed (or wrote).
+  const appliedRoute = useRef({ slug: initialSubmissionSlug, section: initialDrawerTab });
+  // The row a record was opened from: focus returns there when it closes.
+  const invokerRef = useRef<HTMLElement | null>(null);
+  // A finding the address named that the engagement does not have.
+  const [routeMiss, setRouteMiss] = useState<string | null>(null);
   const [detail, setDetail] = useState<SubmissionDeskDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const detailCache = useRef(new Map<string, SubmissionDeskDetail>());
   const detailGeneration = useRef(0);
-  const [tab, setTab] = useState<DocumentTab>(documentTab(initialDrawerTab) ?? (initialSubmissionSlug ? "body" : documentTab(saved.tab) ?? "body"));
+  const [tab, setTab] = useState<DocumentTab>(documentTab(initialDrawerTab) ?? "body");
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  // Reading choices for the body and the notes; they hold across records.
+  const [mode, setMode] = useState<ViewMode>("rendered");
+  const [showWholeWorkspace, setShowWholeWorkspace] = useState(false);
   const [loadingMoreVersions, setLoadingMoreVersions] = useState(false);
   const [loadingMorePending, setLoadingMorePending] = useState(false);
 
   // ── Attachment selection + readiness ────────────────────────────────
   const [selection, setSelection] = useState<number[]>([]);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
   const selectionTouched = useRef(false);
+  // Selections the operator changed, by finding: reopening a record or
+  // stepping back to it restores the selection instead of the default set.
+  const keptSelections = useRef(new Map<string, number[]>());
   const [meta, setMeta] = useState<Map<number, AttachmentMeta>>(new Map());
   const [readinessOverride, setReadinessOverride] = useState<{
     slug: string;
@@ -244,14 +270,7 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
           findingLimit: limit,
         });
         if (!current()) return;
-        if (replace && followFilterRef.current) {
-          followFilterRef.current = false;
-          if (!next.findings.some((item) => item.slug === selectedSlugRef.current)) {
-            const firstRow = next.findings[0] ?? null;
-            selectedRowRef.current = firstRow;
-            setSelectedSlug(firstRow?.slug ?? "");
-          }
-        }
+        if (replace) setLoadMoreError(null);
         const previous = listingRef.current;
         const tail = !replace && previous && loaded > limit
           ? previous.findings.slice(limit).filter((row) => !next.findings.some((item) => item.slug === row.slug))
@@ -282,46 +301,34 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
     void loadListing("refresh");
   }, [refreshVersion, loadListing]);
 
-  // An operator filter change (not a live refresh or a link) lets the
-  // selection follow the filter; the first render is not a change.
-  const filtersSeen = useRef(filterParams);
-  useEffect(() => {
-    if (filtersSeen.current === filterParams) return;
-    filtersSeen.current = filterParams;
-    followFilterRef.current = true;
-  }, [filterParams]);
+  const writeHash = useCallback((slug: string | null, section: DocumentTab = "body", mode: "push" | "replace" = "push") => {
+    appliedRoute.current = { slug: slug ?? undefined, section: slug && section !== "body" ? section : undefined };
+    writeWorkspaceHash(
+      engagementHref(engagementKey, { tab: "submissions", submission: slug ?? undefined, dtab: appliedRoute.current.section }),
+      mode,
+    );
+  }, [engagementKey]);
 
-  // Select the first queued finding until the operator picks one (only on a
-  // fresh visit: a filter that empties the list leaves nothing selected). A
-  // pick that lands before this effect runs wins over the first row.
-  const autoSelected = useRef(Boolean(selectedSlug));
+  // The URL changing under the tab (Back / Forward, a link) opens its finding
+  // and section; no `submission=` shows the queue.
   useEffect(() => {
-    if (autoSelected.current || selectedSlug || !listing?.findings.length) return;
-    autoSelected.current = true;
-    const first = listing.findings[0].slug;
-    setSelectedSlug((current) => current || first);
-  }, [listing, selectedSlug]);
+    const applied = appliedRoute.current;
+    if (applied.slug === initialSubmissionSlug && applied.section === initialDrawerTab) return;
+    const slug = initialSubmissionSlug || null;
+    const stepping = openSlugRef.current !== null && slug !== null;
+    appliedRoute.current = { slug: initialSubmissionSlug, section: initialDrawerTab };
+    if (!stepping) invokerRef.current = null;
+    setRouteMiss(null);
+    openSlugRef.current = slug;
+    setOpenSlug(slug);
+    setTab(documentTab(initialDrawerTab) ?? "body");
+  }, [initialSubmissionSlug, initialDrawerTab]);
 
-  // Browser Back / Forward between findings: the address names the finding.
-  useEffect(() => {
-    if (initialSubmissionSlug && initialSubmissionSlug !== selectedSlugRef.current) setSelectedSlug(initialSubmissionSlug);
-  }, [initialSubmissionSlug]);
-  useEffect(() => {
-    const next = documentTab(initialDrawerTab);
-    if (next) setTab(next);
-  }, [initialDrawerTab]);
-
-  // The address and the saved view follow the open finding and section.
-  useEffect(() => {
-    const href = selectedSlug
-      ? engagementHref(engagementKey, { tab: "submissions", submission: selectedSlug, dtab: tab === "body" ? undefined : tab })
-      : engagementHref(engagementKey, { tab: "submissions" });
-    writeWorkspaceHash(href, "replace");
-  }, [engagementKey, selectedSlug, tab]);
+  // The filters and the loaded depth survive leaving the tab.
   useEffect(() => {
     const view: DeskView = {
       scope: scopeFellBack.current && scope === "all" ? "attention" : scope,
-      state: stateFilter, severity: severityFilter, platform: platformFilter, recency, search: searchText, slug: selectedSlug, tab,
+      state: stateFilter, severity: severityFilter, platform: platformFilter, recency, search: searchText,
       loadedCount: listing?.findings.length ?? saved.loadedCount,
     };
     try {
@@ -329,13 +336,13 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
     } catch {
       // Browser storage may be unavailable; the view just resets next visit.
     }
-  }, [engagementKey, scope, stateFilter, severityFilter, platformFilter, recency, searchText, selectedSlug, tab, listing, saved.loadedCount]);
+  }, [engagementKey, scope, stateFilter, severityFilter, platformFilter, recency, searchText, listing, saved.loadedCount]);
 
-  const selectedRow = useMemo(() => {
-    const fresh = listing?.findings.find((row) => row.slug === selectedSlug) ?? null;
-    if (fresh) selectedRowRef.current = fresh;
-    return fresh ?? (selectedRowRef.current?.slug === selectedSlug ? selectedRowRef.current : null);
-  }, [listing, selectedSlug]);
+  const openRow = useMemo(() => {
+    const fresh = listing?.findings.find((row) => row.slug === openSlug) ?? null;
+    if (fresh) openRowRef.current = fresh;
+    return fresh ?? (openRowRef.current?.slug === openSlug ? openRowRef.current : null);
+  }, [listing, openSlug]);
 
   const applyDetail = useCallback((next: SubmissionDeskDetail, resetSelection: boolean) => {
     detailCache.current.set(`${engagementKey}\n${next.finding.slug}`, next);
@@ -361,31 +368,43 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
       applyDetail(next, resetSelection);
     } catch (cause) {
       if (generation !== detailGeneration.current) return;
+      if (cause instanceof ApiError && cause.status === 404 && openSlugRef.current === slug) {
+        // No such finding: a record cannot stay open on it, so the queue shows and says why.
+        setRouteMiss(slug);
+        invokerRef.current = null;
+        setOpenSlug(null);
+        writeHash(null, "body", "replace");
+        return;
+      }
       setDetailError(errorMessage(cause, "Submission detail unavailable"));
     } finally {
       if (generation === detailGeneration.current) setDetailLoading(false);
     }
-  }, [engagementKey, applyDetail]);
+  }, [engagementKey, applyDetail, writeHash]);
 
-  // Switching findings shows the selected title at once, any cached state
-  // dimmed, and never another finding's document.
+  // Opening a finding shows its title at once, any cached state dimmed, and
+  // never another finding's document. A selection the operator changed for
+  // it earlier in the visit comes back; otherwise the default set applies.
   useEffect(() => {
     readinessGeneration.current += 1;
     setReadinessOverride(null);
     setLoadingMoreVersions(false);
     setLoadingMorePending(false);
-    if (!selectedSlug) {
+    setExportOpen(false);
+    setDetailError("");
+    if (!openSlug) {
       detailGeneration.current += 1;
       setDetail(null);
       setDetailLoading(false);
       return;
     }
-    const cached = detailCache.current.get(`${engagementKey}\n${selectedSlug}`) ?? null;
+    const cached = detailCache.current.get(`${engagementKey}\n${openSlug}`) ?? null;
     setDetail(cached);
-    selectionTouched.current = false;
-    setSelection(cached ? sortedIds(cached.default_attachment_ids) : []);
-    void loadDetail(selectedSlug, true);
-  }, [engagementKey, selectedSlug, loadDetail]);
+    const kept = keptSelections.current.get(openSlug);
+    selectionTouched.current = kept !== undefined;
+    setSelection(kept ?? (cached ? sortedIds(cached.default_attachment_ids) : []));
+    void loadDetail(openSlug, kept === undefined);
+  }, [engagementKey, openSlug, loadDetail]);
 
   // Readiness for the current selection: the detail already evaluated its
   // default set; any other selection asks the read-only readiness endpoint.
@@ -437,42 +456,66 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
     return () => clearTimeout(timer);
   }, [engagementKey, detail, selection, detailMatchesSelection, overrideMatches]);
 
-  const toggleAttachment = (id: number) => {
+  const chooseAttachments = (ids: number[]) => {
+    const slug = openSlugRef.current;
+    if (!slug) return;
+    const next = sortedIds(ids);
     selectionTouched.current = true;
-    setSelection((current) => (
-      current.includes(id) ? current.filter((value) => value !== id) : sortedIds([...current, id])
-    ));
+    selectionRef.current = next;
+    keptSelections.current.set(slug, next);
+    setSelection(next);
   };
-  const replaceAttachments = (ids: number[]) => {
-    selectionTouched.current = true;
-    setSelection(sortedIds(ids));
+  const toggleAttachment = (id: number) => {
+    const current = selectionRef.current;
+    chooseAttachments(current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
   };
 
   const previewOutdated = Boolean(
-    selectedRow
+    openRow
     && detail
-    && selectedRow.id === detail.finding.id
-    && selectedRow.row_version !== detail.finding.row_version,
+    && openRow.id === detail.finding.id
+    && openRow.row_version !== detail.finding.row_version,
   );
 
-  const selectFinding = (row: SubmissionDeskRow) => {
+  // Opening from the queue remembers the row and starts on the body;
+  // stepping from an open record keeps the row the first one was opened from
+  // and the open section, like the Findings record.
+  const openFinding = (row: SubmissionDeskRow, invoker: HTMLElement) => {
     if (locked) return;
-    selectedRowRef.current = row;
-    // A pick is navigation: one history entry, so Back returns to the last finding.
-    if (row.slug !== selectedSlug) {
-      writeWorkspaceHash(engagementHref(engagementKey, { tab: "submissions", submission: row.slug, dtab: tab === "body" ? undefined : tab }));
-    }
-    setSelectedSlug(row.slug);
+    invokerRef.current = invoker;
+    setRouteMiss(null);
+    openRowRef.current = row;
+    setOpenSlug(row.slug);
+    setTab("body");
+    writeHash(row.slug);
+  };
+  const stepToFinding = useCallback((slug: string) => {
+    setOpenSlug(slug);
+    writeHash(slug, tabRef.current);
+  }, [writeHash]);
+  const closeFinding = useCallback(() => {
+    setOpenSlug(null);
+    writeHash(null);
+  }, [writeHash]);
+  const chooseTab = (next: DocumentTab) => {
+    setTab(next);
+    if (openSlugRef.current) writeHash(openSlugRef.current, next);
   };
 
-  const handleLoadMoreFindings = async () => {
-    const page = listing?.findings_page;
-    if (!listing || !page?.has_more || page.next_offset == null || loadingMoreFindings) return;
+  // Reads the next page of the queue: the "Load more" button, a step past
+  // the loaded edge, or a linked finding further down the list.
+  const filterParamsRef = useRef(filterParams);
+  filterParamsRef.current = filterParams;
+  const loadMoreFindings = useCallback(async () => {
+    const page = listingRef.current?.findings_page;
+    if (!page?.has_more || page.next_offset == null || loadingMoreRef.current) return;
     const runner = listingRunnerRef.current;
+    loadingMoreRef.current = true;
     setLoadingMoreFindings(true);
+    setLoadMoreError(null);
     try {
       const next = await listSubmissionDesk(engagementKey, {
-        ...filterParams,
+        ...filterParamsRef.current,
         findingOffset: page.next_offset,
         findingLimit: page.limit,
       });
@@ -486,11 +529,12 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
         };
       });
     } catch (cause) {
-      toast(errorMessage(cause, "More findings could not be loaded"), "error");
+      if (runner === listingRunnerRef.current) setLoadMoreError(errorMessage(cause, "More findings could not be loaded"));
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMoreFindings(false);
     }
-  };
+  }, [engagementKey]);
 
   const loadMoreDetail = async (kind: "versions" | "pending") => {
     if (!detail) return;
@@ -557,7 +601,10 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
           : `Sealed immutable v${version.version_number} of ${slug}. Nothing was submitted to ${platformLabel(platform)}.`,
         "success",
       );
-      await Promise.all([loadDetail(slug, false), loadListing("refresh")]);
+      await Promise.all([
+        openSlugRef.current === slug ? loadDetail(slug, false) : Promise.resolve(),
+        loadListing("refresh"),
+      ]);
     } catch (cause) {
       const message = errorMessage(cause, "Submission export failed");
       setExportError(message);
@@ -612,7 +659,7 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
         result.recovered_version_ids.length > 0 ? "success" : "info",
       );
       await Promise.all([
-        selectedSlug ? loadDetail(selectedSlug, false) : Promise.resolve(),
+        openSlugRef.current ? loadDetail(openSlugRef.current, false) : Promise.resolve(),
         loadListing("refresh"),
       ]);
     } catch (cause) {
@@ -633,10 +680,6 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
     if (ready != null) onReadyCount?.(ready);
   }, [ready, onReadyCount]);
   const needWork = counts ? counts.blocked + counts.needs_draft : null;
-  const shellRef = useRef<HTMLDivElement | null>(null);
-  const { height: paneHeight, stickyTop } = useViewportPane(shellRef, MIN_PANE_HEIGHT, [
-    Boolean(listing), recoveryIssues, listing?.staging_count, listing?.failed_count,
-  ]);
   const toggleFacet = (current: string[], value: string, set: (next: string[]) => void) => {
     set(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   };
@@ -677,13 +720,41 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
     setScope(next);
     if (next === "attention" && stateFilter && !ATTENTION_STATES.has(stateFilter)) setStateFilter(null);
   };
-  const chooseTab = (next: DocumentTab) => setTab(next);
   const exportReadiness = readiness && detail && readiness.final_ready && readiness.existing_version_number == null
     ? readiness
     : null;
-  const selectedOutsideList = Boolean(
-    listing && selectedSlug && !listingLoading && !listing.findings.some((item) => item.slug === selectedSlug),
-  );
+
+  // Previous / Next walk the queue as loaded: a step past its edge reads the
+  // next page, and a linked finding further down is read up to. A merged or
+  // false-positive finding is in no list, so the queue is not read for it.
+  const investigating = openSlug !== null;
+  const order = useMemo(() => (listing?.findings ?? []).map((row) => row.slug), [listing]);
+  const inNoList = detail?.finding.slug === openSlug
+    && (detail?.finding.workflow_status === "merged" || detail?.finding.workflow_status === "false_positive");
+  const queuePosition = useWindowedNavigation({
+    order,
+    current: openSlug,
+    loaded: openSlug !== null && (order.includes(openSlug) || inNoList),
+    window: {
+      rows: listing?.findings ?? null,
+      complete: listing ? !listing.findings_page.has_more : false,
+      extending: loadingMoreFindings,
+      extendError: loadMoreError,
+      loadOlder: loadMoreFindings,
+    },
+    growsAt: "end",
+    open: stepToFinding,
+  });
+  // An export or a recovery re-reads the open finding when it ends, so
+  // stepping waits for it; Back stays live.
+  const navigation: RecordNavigation = !listing && listingError
+    ? { index: undefined, total: undefined, error: listingError }
+    : locked
+      ? { ...queuePosition, onPrevious: undefined, onNext: undefined }
+      : queuePosition;
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: openSlug });
+  const stagingCount = listing?.staging_count ?? 0;
 
   return (
     <div className="findings-redesign subm-page">
@@ -699,18 +770,10 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
           { value: counts.filed, label: "filed", title: listingFilterHint("filed") },
         ] : []}
         status={listingLoading ? (listing ? "Updating…" : "Loading queue…") : null}
-        actions={listing && listing.staging_count > 0 ? (
-          <button
-            type="button"
-            className="ui-button subm-recover"
-            onClick={handleRecovery}
-            disabled={locked}
-            title="Verify and complete staged exports (writes only completed versions)"
-          >
-            <RefreshCcw size={13} aria-hidden="true" />
-            {recovering ? "Recovering…" : `Recover ${listing.staging_count} staged export${listing.staging_count === 1 ? "" : "s"}`}
-          </button>
+        actions={stagingCount > 0 ? (
+          <RecoverExportsButton count={stagingCount} recovering={recovering} disabled={locked} onRecover={() => void handleRecovery()} />
         ) : undefined}
+        hidden={investigating}
       >
         <ScopeToggle
           scope={scope}
@@ -721,153 +784,159 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
         />
       </PageHeader>
 
-      {recoveryIssues && (
-        <div className="subm-callout is-danger subm-recovery" role="alert">
-          <div className="subm-recovery-head">
-            <strong>Recovery incomplete.</strong>
-            <button type="button" className="icon-btn" aria-label="Dismiss recovery details" onClick={() => setRecoveryIssues(null)}>
-              <X size={14} aria-hidden="true" />
-            </button>
-          </div>
-          {recoveryIssues.failed_versions.length > 0 && <PendingVersionRows versions={recoveryIssues.failed_versions} />}
-          {recoveryIssues.orphaned_staging_paths.length > 0 && (
-            <div>
-              <p>Orphaned staging path{recoveryIssues.orphaned_staging_paths.length === 1 ? "" : "s"}:</p>
-              <ul>
-                {recoveryIssues.orphaned_staging_paths.map((path) => <li key={path}><code>{path}</code></li>)}
-              </ul>
+      {/* The queue (an open record replaces it; it stays mounted behind) */}
+      <div ref={resultsRef} className="subm-results" hidden={investigating}>
+        {routeMiss && (
+          <p className="subm-header-notice" role="status">
+            <span><strong>{routeMiss} is not one of this engagement&apos;s findings.</strong> The submission queue is shown.</span>
+          </p>
+        )}
+        {recoveryIssues && !investigating && <RecoveryIssues issues={recoveryIssues} onDismiss={() => setRecoveryIssues(null)} />}
+        <div className="panel findings-toolbar-panel subm-toolbar">
+          <div className="filter-row">
+            <div className="search-wrap subm-search">
+              <Search className="search-icon" aria-hidden="true" />
+              <input
+                className="search-input"
+                type="search"
+                placeholder="Search findings by slug or title…"
+                aria-label="Search submissions"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+              />
+              {searchText && (
+                <button type="button" className="icon-btn" onClick={() => setSearchText("")} aria-label="Clear submission search">
+                  <X size={14} />
+                </button>
+              )}
             </div>
-          )}
-        </div>
-      )}
-
-      <div className="panel findings-toolbar-panel subm-toolbar">
-        <div className="filter-row">
-          <div className="search-wrap subm-search">
-            <Search className="search-icon" aria-hidden="true" />
-            <input
-              className="search-input"
-              type="search"
-              placeholder="Search findings by slug or title…"
-              aria-label="Search submissions"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-            />
-            {searchText && (
-              <button type="button" className="icon-btn" onClick={() => setSearchText("")} aria-label="Clear submission search">
-                <X size={14} />
-              </button>
-            )}
+            <FilterGroup label="State">
+              {STATE_FILTER_ORDER.filter((state) => state !== "incomplete_exports" || (counts?.incomplete_exports ?? 0) > 0 || stateFilter === state).map((state) => (
+                <FilterChip
+                  key={state}
+                  label={state === "incomplete_exports" ? "Failed or staged exports" : listingFilterLabel(state)}
+                  status={state === "incomplete_exports" ? { domain: "submission-version", value: "failed" } : { domain: "submission", value: state }}
+                  description={listingFilterHint(state)}
+                  count={counts ? counts[state] : null}
+                  selected={stateFilter === state}
+                  onToggle={() => toggleState(state)}
+                />
+              ))}
+            </FilterGroup>
           </div>
-          <FilterGroup label="State">
-            {STATE_FILTER_ORDER.filter((state) => state !== "incomplete_exports" || (counts?.incomplete_exports ?? 0) > 0 || stateFilter === state).map((state) => (
-              <FilterChip
-                key={state}
-                label={state === "incomplete_exports" ? "Failed or staged exports" : listingFilterLabel(state)}
-                status={state === "incomplete_exports" ? { domain: "submission-version", value: "failed" } : { domain: "submission", value: state }}
-                description={listingFilterHint(state)}
-                count={counts ? counts[state] : null}
-                selected={stateFilter === state}
-                onToggle={() => toggleState(state)}
-              />
-            ))}
-          </FilterGroup>
+          <div className="filter-row subm-facet-row">
+            <FilterGroup label="Severity">
+              {severities.length === 0 && <span className="subm-muted">None in this list</span>}
+              {severities.map((value) => (
+                <FilterChip
+                  key={value}
+                  label={humanizeStatus(value)}
+                  color={`var(--sev-${value})`}
+                  count={severityFacet[value] ?? 0}
+                  selected={severityFilter.includes(value)}
+                  onToggle={() => toggleFacet(severityFilter, value, setSeverityFilter)}
+                />
+              ))}
+            </FilterGroup>
+            <FilterGroup label="Platform">
+              {platforms.length === 0 && <span className="subm-muted">None in this list</span>}
+              {platforms.map((value) => (
+                <FilterChip
+                  key={value}
+                  label={value === "none" ? "Not set" : platformLabel(value)}
+                  count={platformFacet[value] ?? 0}
+                  selected={platformFilter.includes(value)}
+                  onToggle={() => toggleFacet(platformFilter, value, setPlatformFilter)}
+                />
+              ))}
+            </FilterGroup>
+            <FilterGroup label="Changed">
+              {RECENCY_OPTIONS.map((option) => (
+                <FilterChip
+                  key={option.label}
+                  label={option.label}
+                  selected={recency === option.hours}
+                  onToggle={() => setRecency(option.hours)}
+                />
+              ))}
+            </FilterGroup>
+            <ClearFiltersButton count={activeFilterCount} onClear={clearFilters} />
+          </div>
         </div>
-        <div className="filter-row subm-facet-row">
-          <FilterGroup label="Severity">
-            {severities.length === 0 && <span className="subm-muted">None in this list</span>}
-            {severities.map((value) => (
-              <FilterChip
-                key={value}
-                label={humanizeStatus(value)}
-                color={`var(--sev-${value})`}
-                count={severityFacet[value] ?? 0}
-                selected={severityFilter.includes(value)}
-                onToggle={() => toggleFacet(severityFilter, value, setSeverityFilter)}
-              />
-            ))}
-          </FilterGroup>
-          <FilterGroup label="Platform">
-            {platforms.length === 0 && <span className="subm-muted">None in this list</span>}
-            {platforms.map((value) => (
-              <FilterChip
-                key={value}
-                label={value === "none" ? "Not set" : platformLabel(value)}
-                count={platformFacet[value] ?? 0}
-                selected={platformFilter.includes(value)}
-                onToggle={() => toggleFacet(platformFilter, value, setPlatformFilter)}
-              />
-            ))}
-          </FilterGroup>
-          <FilterGroup label="Changed">
-            {RECENCY_OPTIONS.map((option) => (
-              <FilterChip
-                key={option.label}
-                label={option.label}
-                selected={recency === option.hours}
-                onToggle={() => setRecency(option.hours)}
-              />
-            ))}
-          </FilterGroup>
-          <ClearFiltersButton count={activeFilterCount} onClear={clearFilters} />
-        </div>
-      </div>
 
-      <div
-        ref={shellRef}
-        className="subm-shell"
-        style={paneHeight ? { height: paneHeight, top: stickyTop } : undefined}
-      >
         <SubmissionQueue
           listing={listing}
           loading={listingLoading}
           error={listingError}
-          selectedSlug={selectedSlug}
           locked={locked}
           loadingMore={loadingMoreFindings}
+          loadMoreError={loadMoreError}
           filterLabel={listingFilterLabel(readinessFilter)}
           filtersActive={activeFilterCount > 0}
           scope={scope}
           onClearFilters={clearFilters}
           onShowAll={() => { chooseScope("all"); setStateFilter(null); }}
-          onSelect={selectFinding}
-          onLoadMore={handleLoadMoreFindings}
+          onOpen={openFinding}
+          onLoadMore={() => void loadMoreFindings()}
           onRetry={() => setListingAttempt((attempt) => attempt + 1)}
         />
-        <SubmissionDocument
-          engagementKey={engagementKey}
-          row={selectedRow}
-          detail={detail}
-          detailLoading={detailLoading}
-          detailError={detailError}
-          readiness={readiness}
-          checkingReadiness={checkingReadiness}
-          selection={selection}
-          meta={meta}
-          tab={tab}
-          locked={locked}
-          exporting={exporting}
-          previewOutdated={previewOutdated}
-          outsideList={selectedOutsideList ? listingFilterLabel(readinessFilter) : null}
-          outsideListMore={selectedOutsideList && listing?.findings_page.has_more
-            ? { loaded: listing.findings.length, total: listing.findings_page.total }
-            : null}
-          loadingMoreFindings={loadingMoreFindings}
-          onLoadMoreFindings={handleLoadMoreFindings}
-          requestedSlug={selectedSlug ?? ""}
-          emptyList={listing && listing.findings.length === 0 ? (listing.counts.all === 0 ? "nothing-recorded" : "filtered") : null}
-          loadingMoreVersions={loadingMoreVersions}
-          loadingMorePending={loadingMorePending}
-          onTab={chooseTab}
-          onRefresh={() => selectedSlug && void loadDetail(selectedSlug, false)}
-          onExport={openExport}
-          onToggleAttachment={toggleAttachment}
-          onReplaceAttachments={replaceAttachments}
-          onAttachmentRows={(rows) => rememberMeta(rows.map(metaFromRow))}
-          onLoadMoreVersions={() => void loadMoreDetail("versions")}
-          onLoadMorePending={() => void loadMoreDetail("pending")}
-        />
+        {listing && listing.findings.length > 0 && <div className="findings-shortcuts">
+          <span><code>Enter</code> open</span>
+          <span><code>[ / ]</code> previous / next in a record</span>
+          <span><code>Esc</code> back to results</span>
+        </div>}
       </div>
+
+      {openSlug !== null && (
+        <RecordView
+          label="Submission"
+          noun="submission"
+          navigation={navigation}
+          onBack={closeFinding}
+          titleId={RECORD_TITLE_ID}
+          returnFocusRef={invokerRef}
+        >
+          <SubmissionDocument
+            key={openSlug}
+            engagementKey={engagementKey}
+            slug={openSlug}
+            titleId={RECORD_TITLE_ID}
+            row={openRow}
+            // The detail held belongs to the finding it was read for: the one
+            // just stepped to starts from its own (cached or loading) state.
+            detail={detail?.finding.slug === openSlug ? detail : null}
+            detailLoading={detailLoading}
+            detailError={detailError}
+            readiness={readiness}
+            checkingReadiness={checkingReadiness}
+            selection={selection}
+            meta={meta}
+            tab={tab}
+            mode={mode}
+            showWholeWorkspace={showWholeWorkspace}
+            locked={locked}
+            exporting={exporting}
+            previewOutdated={previewOutdated}
+            stagingCount={stagingCount}
+            recovering={recovering}
+            recoveryIssues={recoveryIssues}
+            loadingMoreVersions={loadingMoreVersions}
+            loadingMorePending={loadingMorePending}
+            onTab={chooseTab}
+            onMode={setMode}
+            onShowWholeWorkspace={setShowWholeWorkspace}
+            onRefresh={() => void loadDetail(openSlug, false)}
+            onExport={openExport}
+            onRecover={() => void handleRecovery()}
+            onDismissRecoveryIssues={() => setRecoveryIssues(null)}
+            onToggleAttachment={toggleAttachment}
+            onReplaceAttachments={chooseAttachments}
+            onAttachmentRows={(rows) => rememberMeta(rows.map(metaFromRow))}
+            onLoadMoreVersions={() => void loadMoreDetail("versions")}
+            onLoadMorePending={() => void loadMoreDetail("pending")}
+          />
+        </RecordView>
+      )}
 
       {exportOpen && detail && exportReadiness && (
         <ExportDialog

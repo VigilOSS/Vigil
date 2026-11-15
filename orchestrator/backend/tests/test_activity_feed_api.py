@@ -685,3 +685,110 @@ def test_feed_search_sees_rows_written_after_an_earlier_search(client, isolate_s
     assert [item["id"] for item in _feed(client, q="finished")["items"]] == [
         f"event:{event}", f"audit:{later}", f"audit:{first}",
     ]
+
+
+# ── One entry by id ─────────────────────────────────────────────────────
+
+
+def _walk_feed(client, **params) -> list[dict]:
+    seen: list[dict] = []
+    cursor = None
+    while True:
+        page = _feed(client, limit=2, **params, **({"before": cursor} if cursor else {}))
+        seen.extend(page["items"])
+        if not page["has_more"]:
+            return seen
+        cursor = page["items"][-1]["cursor"]
+
+
+def test_entry_lookup_returns_the_item_the_feed_returns(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    with db.get_connection() as connection:
+        dispatch_id = connection.execute(
+            """
+            INSERT INTO assessment_dispatches (
+                engagement_id, agent_id, agent_role, dispatched_at, status
+            ) VALUES (?, 'va-acme-01', 'vulnerability-analyst', '2026-04-17T11:59:00Z', 'completed')
+            """,
+            (engagement_id,),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO assessment_runs (engagement_id, run_uuid, run_kind, producer_dispatch_id)
+            VALUES (?, 'run-acme-1', 'web', ?)
+            """,
+            (engagement_id, dispatch_id),
+        )
+    secret = "Authorization: Bearer acme-secret-" + "x" * 4000
+    _audit(
+        engagement_id, "2026-04-17T12:05:00Z", "agent done",
+        actor_name="va-acme-01", action="agent_id=va-acme-01", result="completed",
+        metadata={"agent_id": "va-acme-01", "finding_slugs": ["VA-001", "VA-002"]},
+    )
+    _audit(
+        engagement_id, "2026-04-17T12:04:00Z", "Bash",
+        actor_kind="hook", actor_name="va-acme-01", action=f"bash: curl -H '{secret}' https://app.example.com/",
+        body=secret, metadata={"relative_path": "scans/acme.txt", "token": secret},
+    )
+    _audit(engagement_id, "sometime on tuesday", "Undated note", actor_kind="agent", actor_name="recon-specialist")
+    _event(
+        engagement_id, "2026-04-17 12:01:00", "surface.updated",
+        task_name="auth_entry", agent_name="recon-specialist",
+        summary="auth_entry discovered: https://app.example.com/login",
+    )
+    _event(engagement_id, "not a time", "chain.created", task_name="acme-chain")
+
+    listed = _walk_feed(client, category="decisions,findings,knowledge,lifecycle,code,files,notes,tools")
+
+    assert len(listed) == 5
+    for item in listed:
+        response = client.get(f"{FEED}/{item['id']}")
+        assert response.status_code == 200, response.text
+        assert response.json() == item
+    tool_call = next(item for item in listed if item["kind"] == "Bash")
+    assert tool_call["detail"]["body_markdown"] == secret
+    assert tool_call["detail"]["metadata"]["token"] == secret
+
+
+def test_entry_lookup_is_scoped_to_the_engagement(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    other_key = "2026-04-17-120300-activity-other"
+    write_engagement(isolate_settings["engagements_dir"], key=other_key)
+    other = client.get(f"/engagements/{other_key}")
+    assert other.status_code == 200, other.text
+    mine = _audit(engagement_id, "2026-04-17T12:00:00Z", "Acme note", actor_kind="agent", actor_name="recon-specialist")
+    theirs = _audit(int(other.json()["id"]), "2026-04-17T12:00:00Z", "Other note", actor_kind="agent", actor_name="recon-specialist")
+    their_event = _event(int(other.json()["id"]), "2026-04-17 12:01:00", "chain.created", task_name="other-chain")
+
+    assert client.get(f"{FEED}/audit:{mine}").status_code == 200
+    for entry_id in (f"audit:{theirs}", f"event:{their_event}"):
+        response = client.get(f"{FEED}/{entry_id}")
+        assert response.status_code == 404, response.text
+        assert entry_id in response.json()["detail"]
+    assert client.get(f"/engagements/{other_key}/activity/audit:{theirs}").json()["summary"] == "Other note"
+
+
+def test_entry_lookup_unknown_entry_and_engagement_return_404(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    known = _audit(engagement_id, "2026-04-17T12:00:00Z", "Acme note", actor_kind="agent", actor_name="recon-specialist")
+    # The feed never lists the event `vigil assess log` mirrors from its audit row.
+    mirrored = _event(
+        engagement_id, "2026-04-17 12:00:00", "activity.recorded",
+        task_name="activity-entry", agent_name="recon-specialist", summary="Acme note",
+    )
+
+    for entry_id in (f"audit:{known + 1000}", f"event:{known}", f"event:{mirrored}", "audit:99999999999999999999999999"):
+        response = client.get(f"{FEED}/{entry_id}")
+        assert response.status_code == 404, f"{entry_id}: {response.text}"
+        assert entry_id in response.json()["detail"]
+    assert client.get(f"/engagements/does-not-exist/activity/audit:{known}").status_code == 404
+
+
+def test_entry_lookup_refuses_a_malformed_id(client, isolate_settings):
+    _seed(client, isolate_settings)
+
+    for entry_id in ("audit", "audit:", "audit:0", "audit:-1", "audit:1.5", "audit:01", "audit:abc", "note:3", "AUDIT:3", "audit:3:4", "3", "audit:3%0A"):
+        response = client.get(f"{FEED}/{entry_id}")
+        assert response.status_code == 422, f"{entry_id}: {response.status_code} {response.text}"
+        detail = response.json()["detail"]
+        assert "audit:<id>" in detail and "event:<id>" in detail

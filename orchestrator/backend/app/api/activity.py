@@ -131,6 +131,14 @@ def list_activity_feed(
     return LosslessJSONResponse(response.model_dump(mode="json", by_alias=True))
 
 
+@router.get("/activity/{entry_id}", response_model=ActivityFeedItem)
+def get_activity_entry(engagement_key: str, entry_id: str) -> LosslessJSONResponse:
+    """One feed item by its ``id``, as a feed page returns it."""
+    engagement = get_engagement_or_404(engagement_key)
+    response = ActivityFeedItem(**activity_feed.get_activity_entry(engagement.id, entry_id))
+    return LosslessJSONResponse(response.model_dump(mode="json", by_alias=True))
+
+
 @router.get("/activity-entries", response_model=ListActivityEntriesResponse)
 def list_activity_entries(
     engagement_key: str,

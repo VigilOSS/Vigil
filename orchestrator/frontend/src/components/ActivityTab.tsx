@@ -1,27 +1,39 @@
 // Activity: the engagement's audit log and structured events as one
-// newest-first record (backend /activity). Filters run on the server and live
+// newest-first list (backend /activity). Filters run on the server and live
 // in the URL (`q`, `cats`, `actor`, `range`); loaded pages survive live
 // refreshes, which only fetch what is newer. Refreshes coalesce (one catch-up
 // in flight, one more after it); a refresh that arrives while a first page
 // loads runs once that page lands. Leaving the tab (following an entity chip)
-// and coming back restores the loaded depth, the open entries and the scroll
-// position for the same filters.
+// and coming back restores the loaded depth, the open cards and bursts and the
+// scroll position for the same filters.
+//
+// A row opens its entry in the shared record view, which replaces the list;
+// Back, Escape and browser Back return to it. The open entry and its section
+// live in the URL (`entry=`, `dtab=metadata`). An entry the list has not
+// loaded (a link to an old one) is read by id instead of paging the history
+// to it. While a record is open, new rows wait behind the "new entries" pill
+// so its position among the loaded results holds still.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
+  getActivityEntry,
   listActivityFeed,
   type ActivityActorKind,
   type ActivityCategory,
   type ActivityFeedPage,
   type ActivityItem,
 } from "../lib/activityApi";
+import { ApiError } from "../lib/api";
 import { useCoalescedRunner } from "../lib/useCoalescedRequest";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import { RecordView, useResultsScrollMemory, type RecordNavigation } from "./record/RecordView";
+import { useWindowedNavigation } from "./record/recordNavigation";
 import { Skeleton, SlowLoadHint } from "./Skeletons";
 import { ClearFiltersButton, EmptyState, FilterChip, FilterGroup, PageHeader, ResultsSummary, describeSort } from "./ui";
 import { EntryView, type EntryUi } from "./activity/ActivityEntries";
-import { appendOlder, buildFeed, mergeNewer } from "./activity/activityModel";
+import { EntryRecord, isEntrySection, type EntrySection } from "./activity/ActivityRecord";
+import { appendOlder, buildFeed, mergeNewer, shownRows } from "./activity/activityModel";
 import "../styles/activity.css";
 
 type ActivityTabProps = {
@@ -36,7 +48,13 @@ type ActivityTabProps = {
   initialActor?: string;
   /** `range=` in the URL: the time-range key. */
   initialRange?: string;
+  /** `entry=` in the URL: the activity entry (`ActivityItem.id`) whose record is open. */
+  initialEntryId?: string;
+  /** `dtab=` in the URL: the open entry's section (`metadata`; Details is the default). */
+  initialDrawerTab?: string;
 };
+
+const RECORD_TITLE_ID = "activity-record-title";
 
 const PAGE_SIZE = 100;
 /** The feed's page limit (backend `/activity`), used to restore a deep scroll in few reads. */
@@ -129,6 +147,9 @@ function errorText(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+/** An entry read by id because the list does not hold it, or why that read failed. */
+type EntryRead = { engagementKey: string; id: string; item: ActivityItem | null; error: string | null };
+
 export function ActivityTab({
   engagementKey,
   refreshVersion = 0,
@@ -136,6 +157,8 @@ export function ActivityTab({
   initialCategories,
   initialActor,
   initialRange,
+  initialEntryId,
+  initialDrawerTab,
 }: ActivityTabProps) {
   const [filters, setFilters] = useState<Filters>(() => filtersFromRoute(initialQuery, initialCategories, initialActor, initialRange));
   const [queryInput, setQueryInput] = useState(() => (initialQuery ?? "").trim());
@@ -147,15 +170,38 @@ export function ActivityTab({
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The last read of an older page failed; the next one retries.
+  const [olderError, setOlderError] = useState<string | null>(null);
+  // The dispatch cards and bursts showing their member rows.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  // The entry whose record is open; null while the list shows.
+  const [openId, setOpenId] = useState<string | null>(initialEntryId ?? null);
+  const [section, setSection] = useState<EntrySection>(isEntrySection(initialDrawerTab) ? initialDrawerTab : "details");
+  const [entryRead, setEntryRead] = useState<EntryRead | null>(null);
+  // An entry the address named that this engagement's feed does not have.
+  const [entryMiss, setEntryMiss] = useState<string | null>(null);
+  // Results that replace the list under an open record start in a new scroll box.
+  const [scrollEpoch, setScrollEpoch] = useState(0);
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set());
   const [now, setNow] = useState(() => Date.now());
   const [categoryNotice, setCategoryNotice] = useState<string | null>(null);
   // Why the selection differs from the one a link named; shown while those filters stand.
   const [linkNotice, setLinkNotice] = useState<{ filters: string; text: string } | null>(null);
 
+  const resultsRef = useRef<HTMLElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const openRef = useRef<string | null>(openId);
+  openRef.current = openId;
+  const sectionRef = useRef(section);
+  sectionRef.current = section;
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  // The `entry=` and `dtab=` values the open record last followed (or wrote).
+  const appliedRoute = useRef({ entry: initialEntryId, section: initialDrawerTab });
+  // The row a record was opened from: focus returns there when it closes.
+  const invokerRef = useRef<HTMLElement | null>(null);
+  const loadingOlderRef = useRef(false);
   const atTopRef = useRef(true);
   // Every filter or engagement change starts a new generation; responses from
   // an older generation are dropped.
@@ -203,18 +249,69 @@ export function ActivityTab({
     setQueryInput(routeFilters.q);
   }, [routeKey, currentKey, routeFilters]);
 
+  const hrefFor = useCallback((shown: Filters, entry: string | null, entrySection: EntrySection) => engagementHref(engagementKey, {
+    tab: "activity",
+    q: shown.q || undefined,
+    cats: shown.categories?.join(","),
+    actor: shown.actor || undefined,
+    range: shown.range || undefined,
+    entry: entry ?? undefined,
+    dtab: entry && entrySection !== "details" ? entrySection : undefined,
+  }), [engagementKey]);
+
+  // Opening, stepping, closing and changing section each add a history entry.
+  const writeEntry = useCallback((entry: string | null, shown: EntrySection = "details", mode: "push" | "replace" = "push") => {
+    appliedRoute.current = { entry: entry ?? undefined, section: entry && shown !== "details" ? shown : undefined };
+    writeWorkspaceHash(hrefFor(filtersRef.current, entry, shown), mode);
+  }, [hrefFor]);
+
+  // Rows held behind the pill join the list, highlighted.
+  const takePending = useCallback(() => {
+    const arrivals = pendingRef.current;
+    if (!arrivals.length) return;
+    commitRows(mergeNewer(rowsRef.current, arrivals));
+    setFresh(new Set(arrivals.map((row) => row.id)));
+    commitPending([]);
+  }, [commitRows, commitPending]);
+
+  // Returning to a list that was at its top: it takes the rows that arrived
+  // while the record was open, as it would have had it been on screen.
+  const settleArrivals = useCallback(() => {
+    if (atTopRef.current) takePending();
+  }, [takePending]);
+
+  // Closing hands focus to the row the record was opened from, and the
+  // record view then lands on the row of the entry last shown. An entry with
+  // neither (a link to one the list has not loaded) hands it to the list.
+  const keepReturnFocus = useCallback(() => {
+    if (!invokerRef.current?.isConnected) invokerRef.current = scrollRef.current;
+  }, []);
+
+  // The URL changing under the tab (Back / Forward, a link) opens its entry
+  // and section; no `entry=` shows the list.
+  useEffect(() => {
+    const applied = appliedRoute.current;
+    if (applied.entry === initialEntryId && applied.section === initialDrawerTab) return;
+    const stepping = openRef.current !== null && initialEntryId !== undefined;
+    appliedRoute.current = { entry: initialEntryId, section: initialDrawerTab };
+    setEntryMiss(null);
+    if (!stepping) invokerRef.current = null;
+    if (openRef.current !== null && initialEntryId === undefined) {
+      settleArrivals();
+      keepReturnFocus();
+    }
+    openRef.current = initialEntryId ?? null;
+    setOpenId(initialEntryId ?? null);
+    setSection(isEntrySection(initialDrawerTab) ? initialDrawerTab : "details");
+  }, [initialEntryId, initialDrawerTab, settleArrivals, keepReturnFocus]);
+
+  // Filter changes replace the address in place, keeping the open entry.
   const writtenKey = useRef(currentKey);
   useEffect(() => {
     if (currentKey === writtenKey.current) return;
     writtenKey.current = currentKey;
-    writeWorkspaceHash(engagementHref(engagementKey, {
-      tab: "activity",
-      q: filters.q || undefined,
-      cats: filters.categories?.join(","),
-      actor: filters.actor || undefined,
-      range: filters.range || undefined,
-    }), "replace");
-  }, [currentKey, engagementKey, filters]);
+    writeWorkspaceHash(hrefFor(filters, openRef.current, sectionRef.current), "replace");
+  }, [currentKey, hrefFor, filters]);
 
   const query = useCallback((extra: { before?: string; after?: string; limit?: number } = {}) => listActivityFeed(engagementKey, {
     categories: filters.categories ?? undefined,
@@ -277,7 +374,9 @@ export function ActivityTab({
     pageLoadingRef.current = true;
     setLoading(true);
     // An older-page read from the previous generation is discarded on arrival.
+    loadingOlderRef.current = false;
     setLoadingOlder(false);
+    setOlderError(null);
     setError(null);
     void (async () => {
       try {
@@ -297,7 +396,8 @@ export function ActivityTab({
         applyMeta(page);
         // New results read from their first entry; a restored view returns
         // to its saved position when these rows are on screen.
-        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+        if (openRef.current !== null) setScrollEpoch((epoch) => epoch + 1);
+        else if (scrollRef.current) scrollRef.current.scrollTop = 0;
         scrollTopRef.current = 0;
         atTopRef.current = true;
         restoreScrollRef.current = null;
@@ -323,18 +423,21 @@ export function ActivityTab({
     })();
   }, [query, applyMeta, commitRows, commitPending, recoverCategories, filters]);
 
+  const investigating = openId !== null;
+
   // The scroll box cannot reach a saved position before its entries render,
-  // so the position is applied with the commit that puts them on screen.
+  // or while an open record hides it, so the position is applied with the
+  // commit that puts them on screen.
   useLayoutEffect(() => {
     const top = restoreScrollRef.current;
-    if (top === null || !scrollRef.current || rows.length === 0) return;
+    if (top === null || investigating || !scrollRef.current || rows.length === 0) return;
     restoreScrollRef.current = null;
     scrollRef.current.scrollTop = top;
     scrollTopRef.current = top;
     atTopRef.current = top <= AT_TOP_PX;
-  }, [rows]);
+  }, [rows, investigating]);
 
-  // Remember the loaded depth, open entries and scroll for the return trip.
+  // Remember the loaded depth, open cards and bursts, and scroll for the return trip.
   const saveView = useCallback(() => {
     // Mid-load the rows are the previous filters' (or none): keep the last save.
     if (pageLoadingRef.current) return;
@@ -351,6 +454,12 @@ export function ActivityTab({
   const saveViewRef = useRef(saveView);
   saveViewRef.current = saveView;
   useEffect(() => () => saveViewRef.current(), []);
+
+  // Set while a restart of the list waits for the open record to close.
+  const restartHeldRef = useRef(false);
+  useEffect(() => {
+    if (!investigating && restartHeldRef.current) refreshRef.current();
+  }, [investigating]);
 
   // Live refresh: fetch only rows newer than the newest one held, walking
   // forward page by page so nothing between pages is skipped.
@@ -369,6 +478,8 @@ export function ActivityTab({
       applyMeta(page);
       return;
     }
+    if (restartHeldRef.current && openRef.current !== null) return;
+    restartHeldRef.current = false;
     let cursor = head.cursor;
     let newer: ActivityItem[] = [];
     let last: ActivityFeedPage | null = null;
@@ -383,7 +494,13 @@ export function ActivityTab({
     applyMeta(last);
     setNow(Date.now());
     if (last.has_more) {
-      // Too far behind to stitch: start again from the newest page.
+      // Too far behind to stitch: start again from the newest page. That
+      // replaces the rows an open record is placed among, so it waits for
+      // the record to close.
+      if (openRef.current !== null) {
+        restartHeldRef.current = true;
+        return;
+      }
       const page = await query();
       if (generation !== generationRef.current) return;
       commitRows(page.items);
@@ -393,7 +510,8 @@ export function ActivityTab({
       return;
     }
     if (!newer.length) return;
-    if (atTopRef.current) {
+    // An open record holds arrivals, as a reader scrolled down does.
+    if (atTopRef.current && openRef.current === null) {
       commitRows(mergeNewer(rowsRef.current, [...newer, ...pendingRef.current]));
       commitPending([]);
       setFresh((current) => new Set([...current, ...newer.map((row) => row.id)]));
@@ -439,6 +557,8 @@ export function ActivityTab({
     const onKey = (event: KeyboardEvent) => {
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      // The search belongs to the list, which an open record replaces.
+      if (openRef.current !== null) return;
       if (target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
       event.preventDefault();
       searchRef.current?.focus();
@@ -450,30 +570,33 @@ export function ActivityTab({
   // A notice about the category chips belongs to the selection it explains.
   useEffect(() => setCategoryNotice(null), [currentKey]);
 
-  async function loadOlder() {
-    const tail = rows[rows.length - 1];
-    if (!tail || loadingOlder) return;
+  // The page after the loaded rows: from the list's button, or when a record
+  // steps past the loaded edge.
+  const loadOlder = useCallback(async () => {
+    const tail = rowsRef.current[rowsRef.current.length - 1];
+    if (!tail || loadingOlderRef.current) return;
     const generation = generationRef.current;
+    loadingOlderRef.current = true;
     setLoadingOlder(true);
+    setOlderError(null);
     try {
       const page = await query({ before: tail.cursor });
       if (generation !== generationRef.current) return;
       commitRows(appendOlder(rowsRef.current, page.items));
       setHasOlder(page.has_more);
       applyMeta(page);
-      setError(null);
     } catch (cause) {
-      if (generation === generationRef.current) setError(errorText(cause, "Older activity could not be loaded"));
+      if (generation === generationRef.current) setOlderError(errorText(cause, "Older activity could not be loaded"));
     } finally {
-      if (generation === generationRef.current) setLoadingOlder(false);
+      if (generation === generationRef.current) {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      }
     }
-  }
+  }, [query, applyMeta, commitRows]);
 
   function showPending() {
-    const arrivals = pendingRef.current;
-    commitRows(mergeNewer(rowsRef.current, arrivals));
-    setFresh(new Set(arrivals.map((row) => row.id)));
-    commitPending([]);
+    takePending();
     scrollRef.current?.scrollTo?.({ top: 0 });
     atTopRef.current = true;
   }
@@ -515,7 +638,7 @@ export function ActivityTab({
     searchRef.current?.focus();
   }
 
-  // A row, dispatch card or burst is open when its id (or, for a burst, any
+  // A dispatch card or burst is open when its id (or, for a burst, any
   // member's id) is recorded open; closing clears every alias.
   const toggle = useCallback((id: string, aliases: readonly string[] = []) => {
     setExpanded((current) => {
@@ -527,25 +650,122 @@ export function ActivityTab({
     });
   }, []);
 
+  // Opening from the list remembers the row; stepping from an open record
+  // keeps the row the first one was opened from. Each entry opens on Details.
+  const openEntry = useCallback((id: string, invoker?: HTMLElement | null) => {
+    if (openRef.current === null) invokerRef.current = invoker ?? null;
+    setEntryMiss(null);
+    openRef.current = id;
+    setOpenId(id);
+    setSection("details");
+    writeEntry(id);
+  }, [writeEntry]);
+
+  const closeEntry = useCallback(() => {
+    settleArrivals();
+    keepReturnFocus();
+    openRef.current = null;
+    setOpenId(null);
+    writeEntry(null);
+  }, [settleArrivals, keepReturnFocus, writeEntry]);
+
+  const chooseSection = useCallback((next: EntrySection) => {
+    setSection(next);
+    if (openRef.current) writeEntry(openRef.current, next);
+  }, [writeEntry]);
+
   const days = useMemo(() => buildFeed(rows, now), [rows, now]);
   const categoryLabels = useMemo(() => new Map(categories.map((category) => [category.key, category.label])), [categories]);
-  const ui: EntryUi = { engagementKey, categoryLabels, expanded, toggle, fresh };
+  const ui: EntryUi = { engagementKey, categoryLabels, expanded, toggle, open: openEntry, fresh };
+
+  // The open entry: a row the list holds (shown, or waiting behind the pill),
+  // else the one read by id.
+  const held = useMemo(() => new Map([...pendingNew, ...rows].map((row) => [row.id, row])), [pendingNew, rows]);
+  const read = entryRead && entryRead.engagementKey === engagementKey && entryRead.id === openId ? entryRead : null;
+  const openItem = openId === null ? null : held.get(openId) ?? read?.item ?? null;
+  const unread = openId !== null && !openItem && !read;
+  useEffect(() => {
+    if (!unread || openId === null) return undefined;
+    let superseded = false;
+    getActivityEntry(engagementKey, openId).then(
+      (item) => {
+        if (!superseded) setEntryRead({ engagementKey, id: openId, item, error: null });
+      },
+      (cause) => {
+        if (superseded) return;
+        if (cause instanceof ApiError && (cause.status === 404 || cause.status === 422)) {
+          // Not an entry of this engagement's feed: the list shows and says so.
+          setEntryMiss(openId);
+          invokerRef.current = null;
+          openRef.current = null;
+          setOpenId(null);
+          writeEntry(null, "details", "replace");
+        } else {
+          setEntryRead({ engagementKey, id: openId, item: null, error: errorText(cause, "The entry could not be read") });
+        }
+      },
+    );
+    return () => {
+      superseded = true;
+    };
+  }, [unread, engagementKey, openId, writeEntry]);
+
+  // Previous / Next walk the loaded rows as the list shows them, members of
+  // cards and bursts included. Stepping past the last one loads older entries.
+  const shown = useMemo(() => shownRows(days), [days]);
+  const listPending = loading && rows.length === 0;
+  const ledger = useMemo(() => ({
+    rows: listPending ? null : rows,
+    complete: !hasOlder,
+    extending: loadingOlder,
+    extendError: olderError,
+    loadOlder,
+  }), [listPending, rows, hasOlder, loadingOlder, olderError, loadOlder]);
+  const stepNavigation = useWindowedNavigation({
+    order: shown.order,
+    current: openId,
+    // An entry outside the loaded rows is read by id, never paged to.
+    loaded: true,
+    window: ledger,
+    growsAt: "end",
+    open: openEntry,
+  });
+  const navigation: RecordNavigation = !openItem
+    ? { index: undefined, total: undefined, error: read?.error ?? undefined }
+    : error && rows.length === 0
+      ? { index: undefined, total: undefined, error }
+      : stepNavigation;
+  const outsideLoaded = openItem && navigation.index === null ? rows.length : null;
+
+  // Returning lands on the entry last shown; a row inside a collapsed card or
+  // burst is revealed by opening the groups that hold it.
+  const groupsRef = useRef(shown.groups);
+  groupsRef.current = shown.groups;
+  const revealRow = useCallback((id: string) => {
+    const groups = groupsRef.current.get(id);
+    if (!groups) return;
+    setExpanded((current) => (groups.every((group) => current.has(group)) ? current : new Set([...current, ...groups])));
+  }, []);
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: openId, reveal: revealRow });
+
   const filterCount = (filters.categories !== null ? 1 : 0) + (filters.actor ? 1 : 0) + (filters.q ? 1 : 0) + (filters.range ? 1 : 0);
   const filtered = filterCount > 0;
   const firstLoad = loading && rows.length === 0 && !error;
   const soleCategory = selected.length === 1 ? selected[0] : null;
 
   return (
-    <div className="findings-redesign activity-page">
+    <div className={`findings-redesign activity-page${investigating ? " is-record" : ""}`}>
       <PageHeader
         title="Activity"
         titleId="activity-title"
         purpose="Everything that happened in this engagement — decisions, findings, agent work, notes and files — newest first."
         stats={[{ value: total, label: filtered ? "matching entries" : "entries" }]}
         status={loading && rows.length > 0 ? "Updating…" : null}
+        hidden={investigating}
       />
 
-      <section className="panel activity-view" aria-labelledby="activity-title">
+      {/* The list (an open record replaces it; it stays mounted behind) */}
+      <section ref={resultsRef} className="panel activity-view" aria-labelledby="activity-title" hidden={investigating}>
         <div className="activity-filters">
           <FilterGroup label="Categories" className="activity-categories">
             {categories.length === 0 && Array.from({ length: 6 }, (_, index) => <Skeleton key={index} width={118} height={24} rounded />)}
@@ -570,6 +790,11 @@ export function ActivityTab({
           </FilterGroup>
           {categoryNotice && <p className="activity-notice" role="status">{categoryNotice}</p>}
           {linkNotice?.filters === currentKey && <p className="activity-notice" role="status">{linkNotice.text}</p>}
+          {entryMiss && (
+            <p className="activity-notice" role="status">
+              <strong>{entryMiss} is not one of this engagement&apos;s activity entries.</strong> The list is shown.
+            </p>
+          )}
           <div className="activity-controls">
             <div className="search-wrap activity-search">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="search-icon" aria-hidden="true">
@@ -638,6 +863,7 @@ export function ActivityTab({
         </div>
 
         <div
+          key={scrollEpoch}
           className={`activity-scroll${loading && rows.length ? " is-reloading" : ""}`}
           ref={scrollRef}
           onScroll={onScroll}
@@ -686,6 +912,7 @@ export function ActivityTab({
           ))}
           {rows.length > 0 && (
             <footer className="activity-foot">
+              {olderError && <p className="activity-error" role="alert">Older entries could not be loaded: {olderError}</p>}
               {hasOlder ? (
                 <button type="button" className="ui-button activity-older" onClick={() => void loadOlder()} disabled={loadingOlder}>
                   {loadingOlder ? "Loading older entries…" : "Load older entries"}
@@ -697,6 +924,37 @@ export function ActivityTab({
           )}
         </div>
       </section>
+      {!investigating && rows.length > 0 && <div className="findings-shortcuts">
+        <span><code>/</code> search</span>
+        <span><code>Enter</code> open</span>
+        <span><code>[ / ]</code> previous / next in a record</span>
+        <span><code>Esc</code> back to results</span>
+      </div>}
+
+      {openId !== null && (
+        <RecordView
+          label="Activity entry"
+          noun="entry"
+          navigation={navigation}
+          onBack={closeEntry}
+          titleId={RECORD_TITLE_ID}
+          returnFocusRef={invokerRef}
+        >
+          <EntryRecord
+            key={openId}
+            entryId={openId}
+            item={openItem}
+            loadError={read?.error ?? null}
+            onRetry={() => setEntryRead(null)}
+            outsideLoaded={outsideLoaded}
+            engagementKey={engagementKey}
+            categoryLabels={categoryLabels}
+            section={section}
+            onSectionChange={chooseSection}
+            titleId={RECORD_TITLE_ID}
+          />
+        </RecordView>
+      )}
     </div>
   );
 }

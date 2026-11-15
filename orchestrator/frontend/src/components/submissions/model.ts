@@ -60,8 +60,6 @@ export type DeskView = {
   platform: string[];
   recency: number | null;
   search: string;
-  slug: string;
-  tab: string;
   loadedCount?: number;
 };
 
@@ -72,8 +70,6 @@ export const DEFAULT_DESK_VIEW: DeskView = {
   platform: [],
   recency: null,
   search: "",
-  slug: "",
-  tab: "body",
 };
 
 /** Parses the saved desk view; anything unreadable falls back to the defaults. */
@@ -90,8 +86,6 @@ export function parseDeskView(text: string | null | undefined): DeskView {
       platform: strings(value.platform),
       recency: RECENCY_OPTIONS.some((option) => option.hours === value.recency) ? value.recency as number | null : null,
       search: typeof value.search === "string" ? value.search : "",
-      slug: typeof value.slug === "string" ? value.slug : "",
-      tab: typeof value.tab === "string" ? value.tab : "body",
       ...(Number.isSafeInteger(value.loadedCount) && Number(value.loadedCount) > 0 ? { loadedCount: Number(value.loadedCount) } : {}),
     };
   } catch {

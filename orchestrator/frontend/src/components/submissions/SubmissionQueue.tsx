@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import { gridTimeMode } from "../../lib/serverTime";
 import type { SubmissionDeskListing, SubmissionDeskRow } from "../../lib/submissionsApi";
 import { TimeStamp } from "../formatting";
@@ -25,24 +24,26 @@ export function SubmissionQueue({
   listing,
   loading,
   error,
-  selectedSlug,
   locked,
   loadingMore,
+  loadMoreError,
   filterLabel,
   filtersActive,
   scope,
   onClearFilters,
   onShowAll,
-  onSelect,
+  onOpen,
   onLoadMore,
   onRetry,
 }: {
   listing: SubmissionDeskListing | null;
   loading: boolean;
   error: string;
-  selectedSlug: string;
+  /** An export recovery is running: rows and paging wait for it. */
   locked: boolean;
   loadingMore: boolean;
+  /** The last read of a further page failed. */
+  loadMoreError: string | null;
   /** The listing shown ("To do", "Filed"…), for the empty state. */
   filterLabel: string;
   /** Search, chips or recency narrow the list. */
@@ -50,37 +51,22 @@ export function SubmissionQueue({
   scope: Scope;
   onClearFilters: () => void;
   onShowAll: () => void;
-  onSelect: (row: SubmissionDeskRow) => void;
+  /** Opens the finding's submission record; `invoker` is the row, where focus returns. */
+  onOpen: (row: SubmissionDeskRow, invoker: HTMLElement) => void;
   onLoadMore: () => void;
   onRetry: () => void;
 }) {
   const rows = listing?.findings ?? [];
-  const queueRef = useRef<HTMLDivElement>(null);
-  const restored = useRef(false);
-  useEffect(() => {
-    if (restored.current || loading || !selectedSlug) return;
-    const container = queueRef.current;
-    const selected = container?.querySelector<HTMLElement>('[aria-pressed="true"]');
-    if (selected && container) {
-      // Only restore on arrival; later operator scrolling is authoritative.
-      // Move this pane only, never the document or its sticky navigation.
-      const row = selected.getBoundingClientRect();
-      const pane = container.getBoundingClientRect();
-      if (row.top < pane.top) container.scrollTop += row.top - pane.top;
-      else if (row.bottom > pane.bottom) container.scrollTop += row.bottom - pane.bottom;
-      restored.current = true;
-    }
-  }, [loading, selectedSlug, rows]);
   const page = listing?.findings_page;
   const nothingRecorded = listing != null && listing.counts.all === 0;
   return (
-    <aside className="subm-queue panel" aria-label="Submission queue" aria-busy={loading}>
+    <section className="subm-queue panel" aria-label="Submission queue" aria-busy={loading}>
       <div className="subm-queue-head">
         {page
           ? <ResultsSummary shown={rows.length} total={page.total} noun={page.total === 1 ? "finding" : "findings"} sort={describeSort("Changed", "desc", "time")} />
           : <strong>Findings</strong>}
       </div>
-      <div ref={queueRef} className={`subm-queue-scroll ${loading && rows.length > 0 ? "is-reloading" : ""}`}>
+      <div className={loading && rows.length > 0 ? "is-reloading" : undefined}>
         {error && (
           <div className="subm-inline-error" role="alert">
             <span>{error}</span>
@@ -113,51 +99,49 @@ export function SubmissionQueue({
           )
         ) : (
           <ul className="subm-queue-list">
-            {rows.map((row) => {
-              const selected = row.slug === selectedSlug;
-              return (
-                <li key={row.slug}>
-                  <button
-                    type="button"
-                    className={`subm-queue-row ${selected ? "is-selected" : ""}`}
-                    aria-pressed={selected}
-                    disabled={locked}
-                    onClick={() => onSelect(row)}
-                  >
-                    <span className={`subm-sevbar sevbar-${row.severity}`} aria-hidden="true" />
-                    <span className="subm-queue-main">
-                      <span className="subm-queue-title" title={row.title}>{row.title}</span>
-                      <span className="subm-queue-meta">
-                        <SeverityTag severity={row.severity} size="sm" />
-                        <code>{row.slug}</code>
-                        <QueuePill row={row} />
-                        {row.latest_version_number != null && (
-                          <span
-                            className="subm-badge"
-                            aria-label={`Latest immutable version ${row.latest_version_number}`}
-                          >
-                            v{row.latest_version_number}
-                          </span>
-                        )}
-                        {row.failed_version_count > 0 && (
-                          <span className="subm-badge is-danger">{row.failed_version_count} failed</span>
-                        )}
-                        <SubmissionTime value={row.updated_at} className="subm-queue-time" />
-                      </span>
-                      {row.readiness === "blocked" && row.first_blocker && (
-                        <span className="subm-queue-reason" title={row.first_blocker}>{row.first_blocker}</span>
+            {rows.map((row) => (
+              <li key={row.slug}>
+                <button
+                  type="button"
+                  className="subm-queue-row"
+                  data-record-key={row.slug}
+                  disabled={locked}
+                  onClick={(event) => onOpen(row, event.currentTarget)}
+                >
+                  <span className={`subm-sevbar sevbar-${row.severity}`} aria-hidden="true" />
+                  <span className="subm-queue-main">
+                    <span className="subm-queue-title" title={row.title}>{row.title}</span>
+                    <span className="subm-queue-meta">
+                      <SeverityTag severity={row.severity} size="sm" />
+                      <code>{row.slug}</code>
+                      <QueuePill row={row} />
+                      {row.latest_version_number != null && (
+                        <span
+                          className="subm-badge"
+                          aria-label={`Latest immutable version ${row.latest_version_number}`}
+                        >
+                          v{row.latest_version_number}
+                        </span>
                       )}
+                      {row.failed_version_count > 0 && (
+                        <span className="subm-badge is-danger">{row.failed_version_count} failed</span>
+                      )}
+                      <SubmissionTime value={row.updated_at} className="subm-queue-time" />
                     </span>
-                  </button>
-                </li>
-              );
-            })}
+                    {row.readiness === "blocked" && row.first_blocker && (
+                      <span className="subm-queue-reason" title={row.first_blocker}>{row.first_blocker}</span>
+                    )}
+                  </span>
+                </button>
+              </li>
+            ))}
           </ul>
         )}
       </div>
       {page && page.total > 0 && (
         <div className="list-footer subm-queue-foot">
           <span>{`Showing 1–${rows.length} of ${page.total}`}</span>
+          {loadMoreError && <span className="error-text" role="alert">{loadMoreError}</span>}
           {page.has_more && (
             <button type="button" className="pager-btn" onClick={onLoadMore} disabled={loadingMore || locked}>
               {loadingMore ? "Loading…" : "Load more"}
@@ -165,6 +149,6 @@ export function SubmissionQueue({
           )}
         </div>
       )}
-    </aside>
+    </section>
   );
 }

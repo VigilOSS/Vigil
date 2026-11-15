@@ -1,5 +1,7 @@
 /* Activity view (components/ActivityTab.tsx). Theme colors come only from the
- * app.css tokens, so the dark theme needs no overrides here. */
+ * app.css tokens, so the dark theme needs no overrides here. An open entry
+ * uses the shared record view (record.css); only what an entry's record adds
+ * to it is styled here. */
 
 /* Bounded to the viewport under the sticky workspace header: the page
  * header and filters stay put while the entries scroll. */
@@ -10,7 +12,12 @@
   min-height: 560px;
   min-width: 0;
 }
-.activity-page > .ui-page-header { flex: none; }
+.activity-page > .ui-page-header,
+.activity-page > .findings-shortcuts { flex: none; }
+/* The list stays mounted behind an open record; its own display rule would
+ * otherwise beat the [hidden] attribute. The record reads at page height. */
+.activity-page > [hidden] { display: none; }
+.activity-page.is-record { display: block; height: auto; min-height: 0; }
 
 .activity-view {
   display: flex;
@@ -213,8 +220,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.activity-view a.activity-entity { text-decoration: none; }
-.activity-view a.activity-entity:hover { text-decoration: underline; border-color: var(--accent-muted); }
+.activity-page a.activity-entity { text-decoration: none; }
+.activity-page a.activity-entity:hover { text-decoration: underline; border-color: var(--accent-muted); }
 .activity-entity-more { background: transparent; color: var(--muted); }
 
 .activity-status { flex: none; }
@@ -236,9 +243,7 @@
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-.activity-card-note .k,
-.activity-detail .k,
-.activity-verbatim .k {
+.activity-card-note .k {
   margin-right: 4px;
   color: var(--muted);
   font-size: 10px;
@@ -252,48 +257,47 @@
   background: var(--panel);
 }
 .activity-members .activity-line { padding: 2px 8px 2px 10px; }
-.activity-members .activity-detail,
 .activity-members .activity-card-note { margin-left: 10px; }
 .activity-members .activity-members { margin-left: 10px; margin-right: 0; }
 
-/* ── Detail disclosure ────────────────────────────────── */
+/* ── Entry record ─────────────────────────────────────── */
 
-.activity-detail {
-  display: grid;
-  gap: 10px;
-  margin: 2px 20px 10px 92px;
-  padding: 10px 12px;
+/* The actor reads whole beside the category: no fixed column, no ellipsis. */
+.record-pills .activity-actor { flex: 0 1 auto; flex-wrap: wrap; }
+.record-pills .activity-actor-name { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+
+.activity-record-notice {
+  margin: 0;
+  padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-left: 3px solid var(--pending);
+  border-radius: 5px;
   background: var(--panel-soft);
-  font-size: 12.5px;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
 }
-.activity-members .activity-detail { margin-right: 8px; }
-.activity-detail-summary { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
-.activity-kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; }
-.activity-detail .kv { min-width: 0; }
-.activity-detail .kv .k { margin: 0 0 2px; }
-.activity-detail .kv .v { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
-.activity-detail .kv .v.mono { font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace; font-size: 12px; }
-.activity-detail-entities { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.activity-detail-entities .activity-entities { max-width: none; flex-wrap: wrap; }
+.activity-record-notice strong { color: var(--ink); }
+
+/* Every linked record, whole: chips wrap instead of clipping. */
+.activity-record-linked .activity-entities { max-width: none; flex-wrap: wrap; gap: 6px; overflow: visible; }
+.activity-record-linked .activity-entity { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .activity-unlinked {
-  flex-basis: 100%;
   display: grid;
   gap: 2px;
-  margin: 0;
+  margin: 6px 0 0;
   padding: 0;
   list-style: none;
   color: var(--ink-2);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-.activity-verbatim-head { display: flex; align-items: center; gap: 8px; }
+.activity-unlinked .mono { font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace; }
+
+.activity-verbatim .section-title .copy-inline { margin-left: 4px; text-transform: none; letter-spacing: 0; font-weight: 400; }
 .activity-verbatim pre {
-  margin: 4px 0 0;
-  max-height: 320px;
-  overflow: auto;
-  padding: 8px 10px;
+  margin: 0;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--panel);
@@ -303,8 +307,10 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.activity-metadata > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
-.activity-metadata[open] > summary { margin-bottom: 6px; }
+
+.activity-record-error { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.activity-record-error .error-text { margin: 0; }
+.activity-record-skeleton { display: grid; gap: 10px; max-width: 640px; }
 
 /* ── States ───────────────────────────────────────────── */
 
@@ -346,7 +352,6 @@
   .activity-line > .activity-entity,
   .activity-line > .activity-entities { order: 4; }
   .activity-entities { max-width: 100%; flex-wrap: wrap; }
-  .activity-detail,
   .activity-members,
   .activity-card-note { margin-left: 12px; margin-right: 12px; }
 }

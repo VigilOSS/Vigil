@@ -94,3 +94,12 @@ export function listActivityFeed(engagementKey: string, query: ActivityFeedQuery
   const qs = params.toString();
   return request<ActivityFeedPage>(`/engagements/${encodeURIComponent(engagementKey)}/activity${qs ? `?${qs}` : ""}`);
 }
+
+/**
+ * GET /engagements/{key}/activity/{id}: the feed item with this `id`, exactly
+ * as a feed page returns it, whatever filters the page was read with. 404 when
+ * the engagement's feed has no such entry; 422 when `id` is not an entry id.
+ */
+export function getActivityEntry(engagementKey: string, entryId: string) {
+  return request<ActivityItem>(`/engagements/${encodeURIComponent(engagementKey)}/activity/${encodeURIComponent(entryId)}`);
+}

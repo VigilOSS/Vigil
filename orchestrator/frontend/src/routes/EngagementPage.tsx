@@ -84,6 +84,7 @@ type EngagementPageProps = {
   initialRunObject?: string;
   // Proof work item to highlight (?tab=proof&work=…).
   initialWorkId?: number;
+  initialProofSlug?: string;
   // Command run to open (?tab=commands&command=…).
   initialCommandId?: number;
   initialSurfaceId?: number;
@@ -101,6 +102,7 @@ type EngagementPageProps = {
   initialActivityCategories?: string;
   initialActivityActor?: string;
   initialActivityRange?: string;
+  initialActivityEntry?: string;
   // HTTP sub-view (?tab=http&view=inventory|exchanges).
   initialHttpView?: string;
 };
@@ -253,6 +255,7 @@ function EngagementWorkspace({
   initialRunSection,
   initialRunObject,
   initialWorkId,
+  initialProofSlug,
   initialCommandId,
   initialSurfaceId,
   initialProbeId,
@@ -264,6 +267,7 @@ function EngagementWorkspace({
   initialActivityCategories,
   initialActivityActor,
   initialActivityRange,
+  initialActivityEntry,
   initialHttpView,
 }: EngagementPageProps) {
   const { toast } = useToast();
@@ -957,6 +961,7 @@ function EngagementWorkspace({
               engagementKey={engagementKey}
               refreshVersion={viewVersion("proof")}
               workId={routed("proof", initialWorkId)}
+              initialProofSlug={routed("proof", initialProofSlug)}
               onQueueCounts={handleProofQueueCounts}
             />
           )}
@@ -1010,6 +1015,8 @@ function EngagementWorkspace({
               initialCategories={routed("activity", activityCategories)}
               initialActor={routed("activity", initialActivityActor)}
               initialRange={routed("activity", initialActivityRange)}
+              initialEntryId={routed("activity", initialActivityEntry)}
+              initialDrawerTab={routed("activity", initialDrawerTab)}
             />
           )}
 

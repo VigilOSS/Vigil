@@ -25,6 +25,7 @@ type EngagementRoute = {
   initialRunSection?: string;
   initialRunObject?: string;
   initialWorkId?: number;
+  initialProofSlug?: string;
   initialCommandId?: number;
   initialCoverageItemId?: number;
   initialSurfaceId?: number;
@@ -36,6 +37,7 @@ type EngagementRoute = {
   initialActivityCategories?: string;
   initialActivityActor?: string;
   initialActivityRange?: string;
+  initialActivityEntry?: string;
   initialHttpView?: string;
 };
 
@@ -44,11 +46,11 @@ type EngagementRoute = {
 // #/engagements/{key}?tab=runs&run={id}&dtab={recordSection}&section={childKind}&object={id},
 // #/engagements/{key}?tab=coverage&item={id}&dtab={recordSection}, or
 // &view=items&status={a,b}&reason={text}|&no_reason=1&created_from={text} (read by CoverageTab),
-// #/engagements/{key}?tab=proof&work={id}, #/engagements/{key}?tab=commands&command={id}&dtab={recordSection},
+// #/engagements/{key}?tab=proof&proof={slug}|&work={id}, #/engagements/{key}?tab=commands&command={id}&dtab={recordSection},
 // #/engagements/{key}?tab=surfaces&surface={id}, #/engagements/{key}?tab=oast&probe={id},
 // #/engagements/{key}?tab=http&view=inventory|exchanges&request={id}|flow={id} (record views also carry dtab={recordSection}),
 // #/engagements/{key}?tab=submissions&submission={slug}&dtab={documentTab}, #/engagements/{key}?tab=artifacts&file={name}&dtab=raw,
-// or #/engagements/{key}?tab=activity&q={text}&cats={category,…}&actor={kind}&range={key}.
+// or #/engagements/{key}?tab=activity&q={text}&cats={category,…}&actor={kind}&range={key}&entry={id}&dtab={recordSection}.
 // (The Code view reads its own view/repo/disposition params; see components/code/useCodeRoute.ts.)
 // Explicit selections push canonical history; hashchange and popstate restore
 // the same record and section when the operator returns.
@@ -76,17 +78,19 @@ function parseEngagementRoute(route: string): EngagementRoute | null {
     initialRunSection: runAudit.section,
     initialRunObject: runAudit.object,
     initialWorkId: positiveRouteId(params, "work"),
+    initialProofSlug: params.get("proof") || undefined,
     initialCommandId: positiveRouteId(params, "command"),
     initialCoverageItemId: positiveRouteId(params, "item"),
     initialSurfaceId: positiveRouteId(params, "surface"),
     initialProbeId: positiveRouteId(params, "probe"),
     initialFlowId: positiveRouteId(params, "flow"),
-    initialSubmissionSlug: params.get("submission") ?? undefined,
+    initialSubmissionSlug: params.get("submission") || undefined,
     initialFileName: params.get("file") ?? undefined,
     initialActivityQuery: params.get("q") ?? undefined,
     initialActivityCategories: params.get("cats") ?? undefined,
     initialActivityActor: params.get("actor") ?? undefined,
     initialActivityRange: params.get("range") ?? undefined,
+    initialActivityEntry: params.get("entry") || undefined,
     initialHttpView: params.get("view") ?? undefined,
   };
 }
@@ -220,6 +224,7 @@ function AppContent() {
         initialRunSection={engagementRoute.initialRunSection}
         initialRunObject={engagementRoute.initialRunObject}
         initialWorkId={engagementRoute.initialWorkId}
+        initialProofSlug={engagementRoute.initialProofSlug}
         initialCommandId={engagementRoute.initialCommandId}
         initialSurfaceId={engagementRoute.initialSurfaceId}
         initialProbeId={engagementRoute.initialProbeId}
@@ -231,6 +236,7 @@ function AppContent() {
         initialActivityCategories={engagementRoute.initialActivityCategories}
         initialActivityActor={engagementRoute.initialActivityActor}
         initialActivityRange={engagementRoute.initialActivityRange}
+        initialActivityEntry={engagementRoute.initialActivityEntry}
         initialHttpView={engagementRoute.initialHttpView}
         onBack={() => navigate("/engagements")}
       />

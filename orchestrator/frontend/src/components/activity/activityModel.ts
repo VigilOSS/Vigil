@@ -422,6 +422,31 @@ export function buildFeed(items: ActivityItem[], now: number): DayGroup[] {
 }
 
 /**
+ * The loaded rows as the feed shows them: every row's id in shown order
+ * (members of dispatch cards and bursts included, whether or not their group
+ * is open), and for each grouped row the groups that hold it, outermost first.
+ */
+export function shownRows(days: DayGroup[]): { order: string[]; groups: Map<string, string[]> } {
+  const order: string[] = [];
+  const groups = new Map<string, string[]>();
+  const visit = (entry: FeedEntry, holders: string[]) => {
+    if (entry.type === "row") {
+      order.push(entry.id);
+      if (holders.length) groups.set(entry.id, holders);
+    } else if (entry.type === "dispatch") {
+      for (const item of entry.items) {
+        order.push(item.id);
+        groups.set(item.id, [...holders, entry.id]);
+      }
+    } else {
+      for (const member of entry.entries) visit(member, [...holders, entry.id]);
+    }
+  };
+  for (const day of days) for (const entry of day.entries) visit(entry, []);
+  return { order, groups };
+}
+
+/**
  * How long a dispatch card spans. Without its start row loaded the span is a
  * lower bound, and a sub-second bound says nothing, so it says the start is
  * not loaded instead.

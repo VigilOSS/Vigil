@@ -1122,6 +1122,16 @@ _SOURCES = (
 # ── Public API ──────────────────────────────────────────────────────────
 
 
+def _published(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The items as the API returns them, without the projection's working keys."""
+    for item in items:
+        item.pop("_sort")
+        item.pop("_dispatch_candidates")
+        for entity in item["entities"]:
+            entity.pop("_lookup")
+    return items
+
+
 def list_activity_feed(
     engagement_id: int,
     *,
@@ -1192,13 +1202,8 @@ def list_activity_feed(
         _attach_dispatches(connection, engagement.id, page)
         _resolve_entity_refs(connection, engagement.id, page)
         counts = _category_counts(connection, engagement.id, filters)
-    for item in page:
-        item.pop("_sort")
-        item.pop("_dispatch_candidates")
-        for entity in item["entities"]:
-            entity.pop("_lookup")
     return {
-        "items": page,
+        "items": _published(page),
         "has_more": has_more,
         "total": sum(counts[key] for key in selected),
         "categories": [
@@ -1211,3 +1216,49 @@ def list_activity_feed(
             for key, label in CATEGORIES
         ],
     }
+
+
+_ENTRY_ID_RE = re.compile(r"(audit|event):([1-9][0-9]*)")
+
+
+def get_activity_entry(engagement_id: int, entry_id: str) -> dict[str, Any]:
+    """The feed item with this ``id`` (``audit:<id>`` or ``event:<id>``).
+
+    The row is read and projected by the feed's own page code, so the item is
+    the one a feed page holds for it, whatever filters that page was read
+    with. A row of another engagement, or one the feed never lists (see the
+    module doc), is not an entry of this feed.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    match = _ENTRY_ID_RE.fullmatch(entry_id)
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"{entry_id!r} is not an activity entry id; "
+                "pass an item's id from this feed: audit:<id> or event:<id>"
+            ),
+        )
+    source = next(source for source in _SOURCES if source.name == match.group(1))
+    row_ids = json.dumps([int(match.group(2))])
+    filters = _Filters(
+        actor="", since=None, until=None, fts_term="", text_tokens=(),
+        audit_ids=row_ids, event_ids=row_ids,
+    )
+    with get_connection() as connection:
+        items = [
+            item
+            for dated in (True, False)
+            for item in _fetch(
+                connection, source, engagement.id, filters, CATEGORY_KEYS, None,
+                older=True, limit=1, dated=dated,
+            )
+        ]
+        if not items:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"activity entry {entry_id} is not in this engagement's feed",
+            )
+        _attach_dispatches(connection, engagement.id, items)
+        _resolve_entity_refs(connection, engagement.id, items)
+    return _published(items)[0]
