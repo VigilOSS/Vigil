@@ -85,11 +85,25 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     assert config["permission"] == "ask"
     assert config["command"]["vigil-remediate"]["template"] == "Read the profile. $ARGUMENTS\n"
     assert options["env"]["VIGIL_CLIENT_NAME"] == "opencode"
+    # An update prompt over the TUI would take the next keystroke as consent to upgrade.
+    assert options["env"]["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
     starts, _ = historical_client_starts(launch.root)
     assert [(row["client"], row["mode"], row["event"]) for row in starts] == [("opencode", "remediation", "launch_requested")]
     assert str(launch.project["_profile_path"]) in argv[2]
     assert list(launch.repository.iterdir()) == []
     assert not launch.engagement.exists()
+
+
+def test_opencode_keeps_repository_claude_context_discoverable(launch, monkeypatch):
+    # OpenCode's Claude Code switches also skip the repository's own CLAUDE.md and
+    # .claude/skills, so remediation leaves that compatibility as the owner set it.
+    for name in ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT",
+                 "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"):
+        monkeypatch.delenv(name, raising=False)
+    assert start(launch, "opencode") == 0
+    environment = launch.calls[-1][1]["env"]
+    assert not {"OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT",
+                "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"} & set(environment)
 
 
 def test_opencode_accepts_help_written_to_stderr(launch, monkeypatch):

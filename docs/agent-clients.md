@@ -195,9 +195,27 @@ model through `/models`. See [OpenCode providers](https://opencode.ai/docs/provi
 Generated assessment roles inherit the selected model. Installed role files do
 not prove that a particular specialist was dispatched successfully. Choose the
 reasoning variant at start with the model, for example
-`vigil engagement start <key> --client opencode --mode code -- --model=zai-coding-plan/glm-5.3#max`;
-the TUI applies a variant per message, so changing it mid-session affects only later messages. Vigil's OpenCode sessions do not load Claude Code's
-global `CLAUDE.md` or skills.
+`vigil engagement start <key> --client opencode --mode code -- --model=zai-coding-plan/glm-5.3#max`.
+The TUI takes a new conversation's variant only from the choice it saves per
+model for every session on the machine, so Vigil passes the model without
+`#max` and saves `max` as that model's choice before the TUI starts, as the
+TUI's variant picker does. Without `#<variant>`, the saved choice applies. Each
+message keeps the variant it was sent with and specialists inherit the variant
+of the operator message that launched them, so a change in the TUI affects only
+later messages. Vigil's OpenCode sessions do not load Claude Code's global
+`CLAUDE.md` or skills.
+
+On a specialist task's first request, Vigil's OpenCode plugin resolves its
+dispatch from the captured packet path in the launch message, checks the packet
+digest and the backend row, and binds the task session with
+`agent bind-client-handle`. The task result then ends with a
+`Vigil dispatch binding:` JSON line giving the binding status and the observed
+native agent, model and variant. When the native agent differs from the
+dispatch's registered role, that line and the specialist's system context carry
+a `native_agent_role_mismatch` advisory. A dispatch already bound to another
+session is left bound there and reported as `dispatch_already_bound`. The
+dispatch row's `actual_model` and `actual_reasoning` stay `unknown`, because
+the backend accepts no client-reported runtime identity.
 
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
 is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.

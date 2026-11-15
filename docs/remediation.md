@@ -285,6 +285,14 @@ native `--prompt` option are required. Choose Z.AI Coding Plan with `/connect`
 and your entitled model with `/models`. Vigil preserves native authentication,
 selected models, permissions, project configuration, and existing plugins.
 An existing inline command named `vigil-remediate` is a reported collision.
+OpenCode's Claude Code compatibility also stays as configured, including your
+global `~/.claude/CLAUDE.md` when no global OpenCode `AGENTS.md` exists; its
+`OPENCODE_DISABLE_CLAUDE_CODE` switches would also skip the repository's own
+`CLAUDE.md` and `.claude/skills`. The opening message uses the reasoning variant
+OpenCode saved for the selected model; a change in the TUI applies to later
+messages. Vigil turns off OpenCode's update check for the session, so an update
+prompt cannot take your next keystroke; upgrade OpenCode yourself within the
+supported 1.x range.
 
 ZCode workspace opening currently targets macOS and candidate releases 3.14.3
 through 3.x. This version gate is based on the released interface, not a native

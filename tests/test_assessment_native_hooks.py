@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -178,3 +179,141 @@ process.stdout.write(JSON.stringify({auxiliary,operator}));
     output = json.loads(result.stdout)
     for callback in ("auxiliary", "operator"):
         assert any("recovery-marker" in value for value in output[callback]["system"]) is recover
+
+
+_DISPATCH_SCRIPT = """
+import fs from 'node:fs';
+const module=await import('data:text/javascript;base64,'+fs.readFileSync(process.argv[1]).toString('base64'));
+const options=JSON.parse(process.argv[2]);
+const client={session:{
+  get:async({path:{id}})=>({data:id==='child'?{id,parentID:'parent',directory:options.directory}:{id}}),
+  messages:async()=>({data:[
+    {info:{id:'u1',role:'user',sessionID:'child',time:{created:1}},parts:[{type:'text',text:options.prompt}]},
+    {info:{id:'a1',role:'assistant',sessionID:'child',agent:options.agent,time:{created:2},
+      providerID:'acme',modelID:'model-1',variant:'max'},parts:[]}]})}};
+const plugin=await module.VigilAssessmentHooks({client});
+const requests=[{system:[]},{system:[]}];
+for (const out of requests)
+  await plugin['experimental.chat.system.transform']({sessionID:'child',model:{id:'model-1',providerID:'acme'}},out);
+const task={title:'lane',output:'specialist result',metadata:{sessionId:'child'}};
+await plugin['tool.execute.after']({tool:'task',sessionID:'parent',callID:'c1',args:{}},task);
+process.stdout.write(JSON.stringify({requests,task}));
+"""
+
+
+def _dispatch_fixture(tmp_path, *, binding=None, status="in-progress"):
+    engagement = tmp_path / "acme"
+    engagement.mkdir()
+    (engagement / "scope.json").write_text('{"status":"in_progress","tracks":{"web":{"phase":"recon"}}}')
+    agent = tmp_path / "agent"
+    (agent / "scripts/hooks").mkdir(parents=True)
+    (agent / "scripts/hooks/post-tool-log.sh").write_text("#!/bin/sh\ncat >/dev/null\n")
+    packet = ("## Runtime Identity\nagent_id: acme-recon-1\nagent_role: recon-specialist\n"
+              "assessment_mode: web\n\n## Dispatch Context\nagent_id: acme-other\n").encode()
+    digest = hashlib.sha256(packet).hexdigest()
+    path = engagement / "tools/dispatch-packets/7" / f"{digest}.md"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(packet)
+    calls = tmp_path / "calls.jsonl"
+    row = {"id": 7, "agent_id": "acme-recon-1", "agent_role": "recon-specialist", "status": status,
+           "client_binding": binding}
+    helper = tmp_path / "vigil"
+    helper.write_text(f"""#!{sys.executable}
+import json, sys
+with open({str(calls)!r}, "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[3] == "get":
+    print(json.dumps({row!r}))
+else:
+    print(json.dumps({{"binding": {{"binding_version": 1}}, "superseded": None, "already_bound": False}}))
+""")
+    helper.chmod(0o755)
+    context = tmp_path / "context.json"
+    context.write_text(json.dumps({"schema_version": 1, "client": "opencode", "mode": "web",
+        "workspace": str(tmp_path), "engagement_dir": str(engagement), "agent_root": str(agent),
+        "vigil_cli": str(helper), "install_root": str(tmp_path), "release_id": "test"}))
+    launch = (f"Read the captured dispatch packet {path}; verify SHA-256 {digest}. "
+              "Use registered role recon-specialist; if it is not already loaded, read agent/agents/recon-specialist.md.")
+    return context, calls, launch, path
+
+
+def _run_dispatch(context, *, prompt, agent, directory="/acme/clients/opencode/web"):
+    result = subprocess.run(["node", "--input-type=module", "-e", _DISPATCH_SCRIPT,
+        str(ROOT / "agent/.opencode/plugin/assessment-hooks.js"),
+        json.dumps({"prompt": prompt, "agent": agent, "directory": directory})],
+        env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(context)}, capture_output=True, text=True,
+        timeout=60, check=True)
+    return json.loads(result.stdout)
+
+
+def _calls(path):
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _reported(task):
+    lines = [line for line in task["output"].splitlines() if line.startswith("Vigil dispatch binding: ")]
+    assert len(lines) == 1, task["output"]
+    return json.loads(lines[0].split(": ", 1)[1])
+
+
+def _advisories(request):
+    return [json.loads(line.split("\n", 1)[0].split(": ", 1)[1])
+            for line in request["system"] if line.startswith("Vigil advisory: ")]
+
+
+@pytest.mark.parametrize("agent", ["recon-specialist", "general"])
+def test_opencode_child_binds_its_dispatch_on_first_request(tmp_path, agent):
+    context, calls, launch, _ = _dispatch_fixture(tmp_path)
+    output = _run_dispatch(context, prompt=launch, agent=agent)
+    recorded = _calls(calls)
+    # Resolved once, on the first request, while the native task is still running.
+    assert [call[:4] for call in recorded] == [["assess", "agent", "get", "acme-recon-1"],
+                                                ["assess", "agent", "bind-client-handle", "acme-recon-1"]]
+    bind = recorded[1]
+    assert bind[bind.index("--client") + 1] == "opencode"
+    assert bind[bind.index("--session-namespace") + 1] == "/acme/clients/opencode/web"
+    assert bind[bind.index("--handle") + 1] == "child"
+    note = bind[bind.index("--note") + 1]
+    assert "acme/model-1" in note and "max" in note and agent in note
+    report = _reported(output["task"])
+    assert output["task"]["output"].startswith("specialist result")
+    assert {key: report[key] for key in ("status", "agent_id", "dispatch_id", "handle", "native_agent",
+                                         "registered_role", "model", "variant")} == {
+        "status": "bound", "agent_id": "acme-recon-1", "dispatch_id": 7, "handle": "child",
+        "native_agent": agent, "registered_role": "recon-specialist", "model": "acme/model-1", "variant": "max"}
+    expected = [] if agent == "recon-specialist" else [{"advisory": "native_agent_role_mismatch",
+        "agent_id": "acme-recon-1", "dispatch_id": 7, "registered_role": "recon-specialist",
+        "native_agent": agent, "handle": "child"}]
+    assert report.get("advisories", []) == expected
+    # The system prompt is rebuilt per request, so the specialist keeps the advisory.
+    for request in output["requests"]:
+        assert _advisories(request) == expected
+
+
+def test_opencode_child_does_not_supersede_another_sessions_binding(tmp_path):
+    context, calls, launch, _ = _dispatch_fixture(tmp_path, binding={
+        "asserted_client": "opencode", "asserted_session_namespace": "/acme", "asserted_client_handle": "other",
+        "binding_version": 1})
+    output = _run_dispatch(context, prompt=launch, agent="recon-specialist")
+    assert [call[2] for call in _calls(calls)] == ["get"]
+    report = _reported(output["task"])
+    assert (report["status"], report["reason"]) == ("unresolved", "dispatch_bound_elsewhere")
+    assert report["advisories"] == [{"advisory": "dispatch_already_bound", "agent_id": "acme-recon-1",
+        "dispatch_id": 7, "handle": "child", "bound_client": "opencode", "bound_handle": "other"}]
+
+
+def test_opencode_child_refuses_a_packet_that_differs_from_its_digest(tmp_path):
+    context, calls, launch, path = _dispatch_fixture(tmp_path)
+    path.write_bytes(path.read_bytes().replace(b"acme-recon-1", b"acme-recon-2"))
+    output = _run_dispatch(context, prompt=launch, agent="recon-specialist")
+    assert _calls(calls) == []
+    report = _reported(output["task"])
+    assert (report["status"], report["reason"]) == ("unresolved", "packet_unverified")
+
+
+def test_opencode_child_without_a_dispatch_packet_is_left_unbound(tmp_path):
+    context, calls, _, _ = _dispatch_fixture(tmp_path)
+    output = _run_dispatch(context, prompt="Summarize the README.", agent="explore")
+    assert _calls(calls) == []
+    assert output["task"]["output"] == "specialist result"
+    assert all(_advisories(request) == [] for request in output["requests"])

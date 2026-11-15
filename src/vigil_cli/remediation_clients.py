@@ -216,6 +216,12 @@ def start_repository_client(args: argparse.Namespace, install_root: Path, engage
     if client == "opencode":
         _opencode_capabilities()
         environment["OPENCODE_CONFIG_CONTENT"] = _opencode_configuration(source)
+        # OpenCode reads autoupdate only from its global config. An update prompt
+        # over the TUI takes the next keystroke as consent to upgrade the client,
+        # possibly past the supported 1.x range. OpenCode's Claude Code
+        # compatibility stays as configured: its switches also skip the
+        # repository's own CLAUDE.md and .claude/skills.
+        environment["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         argv = ["opencode", "--prompt", opening]
     elif client == "zcode":
         application, version = _zcode_application()

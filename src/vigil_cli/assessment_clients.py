@@ -285,6 +285,75 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
     return workspace, binding
 
 
+def _opencode_model_variants(arguments: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Split ``--model provider/model#variant`` into the TUI's model and variant.
+
+    The TUI rejects a model id carrying ``#variant`` and takes the variant of a
+    new conversation only from the per-model choice it saved in its state
+    ``model.json``; specialists then inherit each operator message's variant.
+    """
+    forwarded: list[str] = []
+    variants: dict[str, str] = {}
+    tail = iter(arguments)
+    for argument in tail:
+        flag, value = argument, None
+        for name in ("--model", "-m"):
+            if argument == name:
+                value = next(tail, None)
+                if value is None:
+                    raise SystemExit(f"OpenCode {name} requires provider/model or provider/model#variant")
+            elif argument.startswith(name + "="):
+                flag, value = name + "=", argument.split("=", 1)[1]
+        if value is None:
+            forwarded.append(argument)
+            continue
+        model, separator, variant = value.partition("#")
+        if separator:
+            if "/" not in model.strip("/") or not variant or "#" in variant:
+                raise SystemExit(f"OpenCode --model {value!r} must be provider/model#variant")
+            variants[model] = variant
+        forwarded.extend([flag + model] if flag.endswith("=") else [flag, model])
+    return forwarded, variants
+
+
+def _opencode_variant_state(variants: dict[str, str]) -> tuple[Path, dict] | None:
+    """Read OpenCode's saved model choices and apply the launch's variants."""
+    if not variants:
+        return None
+    path = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "opencode/model.json"
+    saved: object = {}
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"Cannot apply the OpenCode variant: {path} is unreadable ({exc}); "
+                         "repair it or choose the variant in OpenCode") from exc
+    if not isinstance(saved, dict) or not isinstance(saved.get("variant", {}), dict):
+        raise SystemExit(f"Cannot apply the OpenCode variant: {path} is not a JSON object with an "
+                         "object variant field; repair it or choose the variant in OpenCode")
+    saved["variant"] = {**saved.get("variant", {}), **variants}
+    return path, saved
+
+
+def _write_opencode_variant_state(path: Path, saved: dict) -> None:
+    """Replace the native choice file atomically, as the TUI's own picker would."""
+    target = path.resolve() if path.exists() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+    temporary = target.with_name(f".{target.name}.vigil-{uuid.uuid4().hex}")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(saved, handle)
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    except OSError as exc:
+        raise SystemExit(f"Cannot apply the OpenCode variant to {target}: {exc}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                  extra_args: list[str], *, no_autoprompt: bool = False) -> None:
     """Start one selected mode; do not infer GUI native-session ownership."""
@@ -311,6 +380,8 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                 if focus is not None:
                     raise SystemExit("Supply one OpenCode operator prompt, not repeated --prompt values")
                 focus = value
+    forwarded, variants = _opencode_model_variants(forwarded)
+    variant_state = _opencode_variant_state(variants)
     application = None
     native_version = None
     executable = None
@@ -410,6 +481,10 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         if focus is not None:
             prompt += ("\n\nOperator focus: " if prompt else "") + focus
         argv.extend(["--prompt", prompt])
+    if variant_state is not None:
+        _write_opencode_variant_state(*variant_state)
+        for model, variant in variants.items():
+            print(f"variant: {variant} for {model} (saved as OpenCode's choice for this model)", flush=True)
     os.chdir(workspace)
     from .client_sessions import record_client_launch
     record_client_launch(install_root, engagement, client, mode)

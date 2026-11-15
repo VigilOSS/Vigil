@@ -244,6 +244,51 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]
 
 
+@pytest.mark.parametrize("arguments", [["--model=acme/model-1#max"], ["--model", "acme/model-1#max"],
+                                       ["-m", "acme/model-1#max"]])
+def test_opencode_start_applies_a_model_variant_the_tui_reads(context, monkeypatch, tmp_path, arguments):
+    root, engagement, _ = context
+    state = tmp_path / "state"
+    saved = state / "opencode/model.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"recent": [{"providerID": "acme", "modelID": "model-1"}],
+                                 "variant": {"acme/model-1": "high", "acme/model-2": "low"}}))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
+    calls = []
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append(argv))
+    engagements.start_engagement(root, engagement, "opencode", arguments, "code")
+    argv = calls[0]
+    # The TUI rejects a model id that carries a #variant, and takes its opening
+    # variant only from the per-model choice it saved.
+    models = [argument.split("=", 1)[1] for argument in argv if argument.startswith("--model=")]
+    models += [argv[index + 1] for index, argument in enumerate(argv) if argument in ("--model", "-m")]
+    assert models == ["acme/model-1"]
+    assert json.loads(saved.read_text()) == {"recent": [{"providerID": "acme", "modelID": "model-1"}],
+                                             "variant": {"acme/model-1": "max", "acme/model-2": "low"}}
+
+
+@pytest.mark.parametrize("saved_text", ["[]", "{", '{"variant": []}'])
+def test_opencode_variant_refuses_an_unreadable_native_choice_file(context, monkeypatch, tmp_path, saved_text):
+    root, engagement, _ = context
+    saved = tmp_path / "state/opencode/model.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(saved_text)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
+    calls = []
+    monkeypatch.setattr(clients.os, "execve", lambda *args: calls.append(args))
+    with pytest.raises(SystemExit, match="model.json"):
+        engagements.start_engagement(root, engagement, "opencode", ["--model=acme/model-1#max"], "code")
+    assert calls == []
+    assert saved.read_text() == saved_text
+
+
 def test_opencode_helper_path_finds_opencode_by_its_linked_name(context, monkeypatch):
     root, engagement, _ = context
     # Homebrew links bin/opencode to a differently named executable elsewhere.

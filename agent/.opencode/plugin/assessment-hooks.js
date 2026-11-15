@@ -1,8 +1,13 @@
 // Native web/code adapter. The legacy standard plugin remains Blue-owned.
-import {execFileSync} from "node:child_process"
+import {execFile, execFileSync} from "node:child_process"
 import {readFileSync, realpathSync, writeFileSync, renameSync, existsSync, lstatSync, openSync, closeSync, unlinkSync} from "node:fs"
 import {join, dirname} from "node:path"
 import {createHash, randomUUID} from "node:crypto"
+import {promisify} from "node:util"
+
+const execFileAsync = promisify(execFile)
+const PACKET_REFERENCE = /tools\/dispatch-packets\/(\d+)\/([0-9a-f]{64})\.md/g
+const BIND_ATTEMPTS = 3
 
 export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT}) => {
   const states = new Map()
@@ -100,7 +105,108 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     const current = pending.length === 1 ? pending[0] : null
     if (!current || current.sessionID !== sessionID)
       throw new Error("Current unfinished assistant cannot be correlated")
-    return {current, messages, boundary: boundary || null, parentID: session.data.parentID}
+    return {current, messages, boundary: boundary || null, parentID: session.data.parentID,
+      directory: session.data.directory}
+  }
+  // A native task child names its dispatch only through the launch message's
+  // content-addressed packet path. The packet's leading Runtime Identity names
+  // the dispatch, and the backend row must agree before the handle is bound.
+  const dispatches = new Map()
+  const helper = async (context, args) => {
+    const {stdout} = await execFileAsync(context.vigil_cli, args, {cwd: context.workspace, env: env(context),
+      encoding: "utf8", timeout: 15000, maxBuffer: 4 * 1024 * 1024})
+    return JSON.parse(stdout.trim().split("\n").at(-1))
+  }
+  const failure = error => String(error.stderr || error.message || error).trim().slice(-500)
+  const packetIdentity = (context, id, sha256) => {
+    const path = join(realpathSync(context.engagement_dir), "tools/dispatch-packets", id, sha256 + ".md")
+    const metadata = lstatSync(path)
+    if (realpathSync(path) !== path || !metadata.isFile() || metadata.size > 1024 * 1024)
+      throw new Error("Dispatch packet is not a bounded regular file")
+    const bytes = readFileSync(path)
+    if (createHash("sha256").update(bytes).digest("hex") !== sha256) throw new Error("Dispatch packet differs from its SHA-256")
+    const [heading, ...lines] = bytes.toString("utf8").split("\n")
+    const fields = {}
+    if (heading === "## Runtime Identity")
+      for (const line of lines) {
+        if (!line.trim()) break
+        const match = /^([a-z_]+): (.+)$/.exec(line)
+        if (match) fields[match[1]] = match[2].trim()
+      }
+    if (!fields.agent_id || !/^[a-z0-9][a-z0-9-]*$/.test(fields.agent_role || ""))
+      throw new Error("Dispatch packet has no Runtime Identity")
+    return fields
+  }
+  const resolveDispatch = async (context, session, native, attempts) => {
+    const launch = native.messages.find(message => message.info?.role === "user")
+    const text = (launch?.parts || []).filter(part => part?.type === "text").map(part => String(part.text)).join("\n")
+    const packets = [...new Set([...text.matchAll(PACKET_REFERENCE)].map(match => `${match[1]}/${match[2]}`))]
+    if (packets.length !== 1)
+      return packets.length ? {status: "unresolved", reason: "ambiguous_dispatch_packets", packets, advisories: []}
+        : {status: "unresolved", reason: "no_dispatch_packet", advisories: []}
+    const [id, sha256] = packets[0].split("/")
+    const info = native.current
+    const record = {dispatch_id: Number(id), packet_sha256: sha256, handle: session,
+      session_namespace: native.directory || context.project || context.workspace,
+      native_agent: info.agent || "unknown", model: `${info.providerID}/${info.modelID}`,
+      variant: info.variant || "default"}
+    let identity
+    try { identity = packetIdentity(context, id, sha256) } catch (error) {
+      return {...record, status: "unresolved", reason: "packet_unverified", detail: error.message, advisories: []}
+    }
+    Object.assign(record, {agent_id: identity.agent_id, registered_role: identity.agent_role})
+    const reference = {agent_id: record.agent_id, dispatch_id: record.dispatch_id}
+    const mismatch = record.native_agent === record.registered_role ? [] : [{advisory: "native_agent_role_mismatch",
+      ...reference, registered_role: record.registered_role, native_agent: record.native_agent, handle: session}]
+    const outcome = ({advisories = [], ...fields}) => ({...record, ...fields, advisories: [...mismatch, ...advisories]})
+    let row
+    try { row = await helper(context, ["assess", "agent", "get", record.agent_id]) } catch (error) {
+      if (error.code === 2) return outcome({status: "unresolved", reason: "dispatch_not_found"})
+      return outcome({status: "failed", reason: "helper_failed", detail: failure(error), attempts: attempts + 1})
+    }
+    if (row?.id !== record.dispatch_id || row.agent_id !== record.agent_id || row.agent_role !== record.registered_role)
+      return outcome({status: "unresolved", reason: "dispatch_identity_mismatch"})
+    if (row.status !== "in-progress")
+      return outcome({status: "unresolved", reason: "dispatch_not_in_progress", dispatch_status: row.status})
+    const current = row.client_binding
+    if (current?.asserted_client_handle === session)
+      return outcome({status: "already_bound", binding_version: current.binding_version})
+    // A second live session for one packet is a duplicate launch, not a correction.
+    if (current) return outcome({status: "unresolved", reason: "dispatch_bound_elsewhere",
+      advisories: [{advisory: "dispatch_already_bound", ...reference, handle: session,
+        bound_client: current.asserted_client, bound_handle: current.asserted_client_handle}]})
+    const note = `Recorded by the Vigil OpenCode plugin at native task session ${session}'s first request `
+      + `(dispatch packet ${sha256}). Observed native agent ${record.native_agent}, model ${record.model}, `
+      + `variant ${record.variant}.` + (mismatch.length ? ` The native agent differs from registered role ${record.registered_role}.` : "")
+    try {
+      const bound = await helper(context, ["assess", "agent", "bind-client-handle", record.agent_id, "--client", "opencode",
+        "--session-namespace", record.session_namespace, "--handle", session, "--note", note])
+      return outcome({status: bound?.already_bound ? "already_bound" : "bound", binding_version: bound?.binding?.binding_version})
+    } catch (error) {
+      return outcome({status: "failed", reason: "helper_failed", detail: failure(error), attempts: attempts + 1})
+    }
+  }
+  const dispatchFor = async (context, session, native) => {
+    const previous = await dispatches.get(session)
+    if (previous && !(previous.status === "failed" && previous.attempts < BIND_ATTEMPTS)) return previous
+    const pending = resolveDispatch(context, session, native, previous?.attempts || 0).catch(error =>
+      ({status: "failed", reason: "plugin_error", detail: failure(error), attempts: (previous?.attempts || 0) + 1, advisories: []}))
+    dispatches.set(session, pending)
+    const record = await pending
+    if (record.status === "failed") console.error(`[vigil] Dispatch binding for ${session} failed: ${record.detail}`)
+    return record
+  }
+  // The operator sees the task result, never the child's system prompt.
+  const reportDispatch = async output => {
+    const session = output?.metadata?.sessionId
+    if (typeof session !== "string" || !dispatches.has(session)) return
+    const record = await dispatches.get(session)
+    if (record.reason === "no_dispatch_packet" || record.reported) return
+    record.reported = true
+    const {reported, attempts, ...shown} = record
+    output.output = `${output.output ?? ""}\n\nVigil dispatch binding: ${JSON.stringify(shown)}`
+      + (["bound", "already_bound"].includes(record.status)
+        ? "\nThis handle is recorded; run `agent bind-client-handle` only to correct it." : "")
   }
   const toolName = tool => ({bash: "Bash", read: "Read", write: "Write", edit: "Edit",
     task: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}[tool] || tool)
@@ -146,7 +252,10 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     } catch (error) { console.error(`[vigil] Native activity was not recorded: ${error.message}`) }
   }
   return {
-    "tool.execute.after": async (input, output) => log(input, output),
+    "tool.execute.after": async (input, output) => {
+      if (input.tool === "task") await reportDispatch(output)
+      return log(input, output)
+    },
     event: async ({event}) => {
       const part = event.properties?.part
       if (event.type === "message.part.updated" && part?.type === "tool" && part.state?.status === "error")
@@ -185,6 +294,14 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
         const summary = native.messages.filter(message => message.info?.summary && message.info?.finish && !message.info?.error).at(-1)?.info
         if (info.agent !== "operator" || native.parentID) {
           output.system.push("Restore only this specialist's assigned role, mandatory constraints, and active ownership after a context boundary; never load an operator core.")
+          if (native.parentID) {
+            const dispatch = await dispatchFor(context, input.sessionID, native)
+            for (const advisory of dispatch.advisories.filter(item => item.advisory === "native_agent_role_mismatch"))
+              output.system.push(`Vigil advisory: ${JSON.stringify(advisory)}\nThis task runs as native agent `
+                + `${JSON.stringify(advisory.native_agent)}, but its dispatch packet registers ${advisory.registered_role}. `
+                + `Follow the packet's Runtime Identity: read ${JSON.stringify(join(context.agent_root, "agents", advisory.registered_role + ".md"))} `
+                + "and its required references; the native agent's own instructions do not change your role.")
+          }
           return
         }
         if (summary) {
