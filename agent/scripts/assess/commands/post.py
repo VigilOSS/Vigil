@@ -6,7 +6,7 @@ import json
 import sys
 
 from assess.lib.client import AssessmentClient, require_write_result
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contracts import raw_endpoint_error
 from assess.lib.json_inputs import parse_json_argument
 
@@ -37,7 +37,7 @@ def register(subparsers) -> None:
             "(typed endpoints such as probe-runs are disabled here)"
         ),
     )
-    p.add_argument("payload", nargs="?", help="Path to JSON payload file or inline JSON object/array")
+    p.add_argument("payload", type=input_path, nargs="?", help="Path to JSON payload file or inline JSON object/array")
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON payload text")
     p.set_defaults(func=run)
 

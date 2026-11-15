@@ -22,7 +22,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.code_record_input import fail
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contracts import get_contract
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.schema_validation import collect_validation_errors, load_schema
@@ -167,7 +167,7 @@ def register(subparsers) -> None:
     finally:
         subparsers._parser_class = saved_parser_class
     p.add_argument("intel_type", help=f"One of: {types_list}")
-    p.add_argument("json_file", help="Path to intel JSON file matching the intel-<type> schema")
+    p.add_argument("json_file", type=input_path, help="Path to intel JSON file matching the intel-<type> schema")
     p.add_argument(
         "--dry-run",
         action="store_true",

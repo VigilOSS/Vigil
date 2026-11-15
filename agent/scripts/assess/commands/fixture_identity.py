@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 
+from assess.lib.config import input_path
 from assess.lib.fixture_identity import (
     FixtureIdentityError,
     FixtureManifest,
@@ -32,11 +33,12 @@ def register(subparsers) -> None:
     observe.add_argument("fixture_name", help="Manifest alias for this session or fixture.")
     observe.add_argument(
         "payload_file",
+        type=input_path,
         nargs="?",
         default="-",
         help="JSON response path; omit or use '-' to read stdin.",
     )
-    observe.add_argument("--manifest", required=True, help="Fixture manifest path.")
+    observe.add_argument("--manifest", type=input_path, required=True, help="Fixture manifest path.")
     observe.add_argument("--source", default="", help="Optional response/probe provenance.")
     observe.add_argument(
         "--replace",
@@ -48,7 +50,7 @@ def register(subparsers) -> None:
 
     resolve = actions.add_parser("resolve", help="Resolve <fixture-name>.<field> to a concrete id.")
     resolve.add_argument("reference", help="Manifest reference, for example org3.organization_id.")
-    resolve.add_argument("--manifest", required=True, help="Fixture manifest path.")
+    resolve.add_argument("--manifest", type=input_path, required=True, help="Fixture manifest path.")
     resolve.add_argument("--json", dest="as_json", action="store_true", help="Emit JSON.")
     resolve.set_defaults(func=_run_resolve)
 

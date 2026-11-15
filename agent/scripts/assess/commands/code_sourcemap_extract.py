@@ -14,7 +14,7 @@ import sys
 import uuid
 from urllib.parse import urlsplit
 
-from assess.lib.config import resolve_engagement_dir
+from assess.lib.config import input_path, resolve_engagement_dir
 
 
 _SNAPSHOT_FORMAT_VERSION = 1
@@ -28,7 +28,7 @@ def register(subparsers) -> None:
         "code-sourcemap-extract",
         help="Safely extract sourcesContent for explicit code-ingest",
     )
-    parser.add_argument("map_root", help="Directory containing .js.map/.css.map files")
+    parser.add_argument("map_root", type=input_path, help="Directory containing .js.map/.css.map files")
     parser.add_argument(
         "--output-root",
         default=None,

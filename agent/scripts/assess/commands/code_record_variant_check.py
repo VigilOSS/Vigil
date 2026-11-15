@@ -13,7 +13,7 @@ from assess.lib.client import (
 )
 from assess.lib.code_record_input import sha256
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contracts import MAX_VARIANT_PARENT_FINDINGS
 
 
@@ -44,6 +44,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "receipt_json",
+        type=input_path,
         help="Path to one receipt JSON object, or '-' to read it from stdin",
     )
     p.add_argument(

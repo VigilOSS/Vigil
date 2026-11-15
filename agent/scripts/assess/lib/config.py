@@ -6,6 +6,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 SESSION_ENGAGEMENT_ENV = "VIGIL_SESSION_ENGAGEMENT_DIR"
 ENGAGEMENT_BINDING_CONTRACT = (
@@ -177,6 +178,70 @@ def anchor_engagement_relative(path: str, engagement_dir_flag: str | None = None
         return path
     eng_dir = resolve_engagement_dir(engagement_dir_flag)
     return str(Path(eng_dir) / path)
+
+
+class InputPathArgument(str):
+    """An argparse value naming a file or directory the verb reads.
+
+    The marker lets :func:`resolve_input_path_arguments` find every input path
+    on a parsed namespace without a per-verb list.
+    """
+
+
+def input_path(value: str) -> str:
+    """argparse ``type=`` for an input path (see :func:`resolve_input_path`)."""
+    return InputPathArgument(value)
+
+
+def resolve_input_path(raw: str, engagement_dir_flag: str | None = None) -> str:
+    """Resolve one input path the way every assess verb reads its inputs.
+
+    A path that exists as given (absolute, or relative to the working
+    directory) is returned unchanged. A relative path absent from the working
+    directory is looked up under the resolved engagement directory, because
+    prompts and handoffs name engagement-relative paths and a client may run
+    its shell elsewhere in the tree (OpenCode starts specialists in
+    ``<engagement>/clients/opencode/<mode>``). The substitution is named on
+    stderr. Anything else (``-`` for stdin, inline JSON, a path found in
+    neither place) is returned unchanged for the verb's own handling.
+    """
+    text = str(raw)
+    if not text or text == "-" or text.lstrip().startswith(("{", "[")):
+        return raw
+    path = Path(text).expanduser()
+    if path.is_absolute() or path.exists():
+        return raw
+    try:
+        engagement_dir = resolve_engagement_dir(engagement_dir_flag)
+    except SystemExit:
+        return raw
+    candidate = Path(engagement_dir) / path
+    if not candidate.exists():
+        return raw
+    resolved = str(candidate.resolve())
+    print(
+        f"note: input path '{text}' is not under the working directory {Path.cwd()}; "
+        f"resolved against the engagement directory -> {resolved}",
+        file=sys.stderr,
+    )
+    return resolved
+
+
+def resolve_input_path_arguments(namespace: Any) -> None:
+    """Resolve every :func:`input_path`-typed value on a parsed namespace."""
+    flag = getattr(namespace, "engagement_dir", None)
+    for name, value in vars(namespace).items():
+        if isinstance(value, InputPathArgument):
+            setattr(namespace, name, resolve_input_path(value, flag))
+        elif isinstance(value, list) and any(isinstance(item, InputPathArgument) for item in value):
+            setattr(
+                namespace,
+                name,
+                [
+                    resolve_input_path(item, flag) if isinstance(item, InputPathArgument) else item
+                    for item in value
+                ],
+            )
 
 
 def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:

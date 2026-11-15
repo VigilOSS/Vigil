@@ -347,7 +347,6 @@ def test_a_page_with_no_leased_row_says_nothing_about_tokens(
     "tokens",
     [
         ["--show-tokens", "--show-tokens"],
-        ["--show-tokens", "--json"],
         ["--show-tokens", "--ids-only"],
     ],
 )

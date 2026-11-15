@@ -8,7 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.code_record_input import unwrap_request_envelope
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 
 
 def _derive_module_key(name: str) -> str:
@@ -111,7 +111,7 @@ def _require_modules_receipt(
 def register(subparsers) -> None:
     p = subparsers.add_parser("modules", help="Record module definitions for a code repository")
     p.add_argument("repo_id", help="Repository ID")
-    p.add_argument("modules_json", help="Path to JSON file with array of module objects")
+    p.add_argument("modules_json", type=input_path, help="Path to JSON file with array of module objects")
     p.set_defaults(func=run)
 
 

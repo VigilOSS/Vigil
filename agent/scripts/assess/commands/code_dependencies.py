@@ -17,6 +17,7 @@ from assess.lib.code_snapshot import (
     SourceSnapshotRaceError,
     validate_snapshot,
 )
+from assess.lib.config import input_path
 from assess.lib.dependency_picture import IndexedFile, build_dependency_picture
 
 PICTURE_SCHEMA = "code-dependency-picture/v1"
@@ -100,9 +101,10 @@ def register(subparsers) -> None:
             "module. Confirm against the real artifact before acting on an exclusion."
         ),
     )
-    p.add_argument("repo_path", help="Path to the sealed source tree (or a repository root)")
+    p.add_argument("repo_path", type=input_path, help="Path to the sealed source tree (or a repository root)")
     p.add_argument(
         "--structural-index",
+        type=input_path,
         default=None,
         help=(
             "Path to a `code-index build` manifest.json. Without it every "
@@ -112,6 +114,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--scan-report",
+        type=input_path,
         default=None,
         help=(
             "Optional secondary input: a Trivy/Grype JSON report to correlate "

@@ -20,7 +20,7 @@ from assess.lib.client import (
     require_write_result,
 )
 from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contracts import CODE_SKIP_REASONS
 from assess.lib.schema_validation import load_schema
 
@@ -73,7 +73,7 @@ _CLASSIFICATION_PRIORITY_BANDS = {
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("classify", help="Bulk-classify code files for analysis prioritization")
-    p.add_argument("classifications_json", help="Path to JSON file with array of classification objects")
+    p.add_argument("classifications_json", type=input_path, help="Path to JSON file with array of classification objects")
     p.add_argument(
         "--agent-id",
         default=None,

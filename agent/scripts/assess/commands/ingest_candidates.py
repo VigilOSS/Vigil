@@ -17,7 +17,7 @@ from assess.lib.bulk_ingest import (
 from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens, surface_refs
 from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES, tagged_terminal_reason
 from assess.lib.client import AssessmentClient
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.params import extract_path_params, extract_query_params, extract_url_path, generate_params_sig
 from assess.lib.scope import host_admitted, ingest_scope_filter
 from assess.lib.surface_links import create_surface_request_variant_link
@@ -46,7 +46,7 @@ def register(subparsers) -> None:
         help="Ingest metadata-rich surface candidate JSONL into assessment state",
     )
     p.add_argument("source", help="Source name (e.g. surface-collector-curated)")
-    p.add_argument("records_file", help="Path to candidate_records.jsonl")
+    p.add_argument("records_file", type=input_path, help="Path to candidate_records.jsonl")
     p.set_defaults(func=run)
 
 

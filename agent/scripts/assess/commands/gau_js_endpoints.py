@@ -33,7 +33,7 @@ from shlex import quote
 from urllib.parse import urlparse
 
 from assess.lib.client import AssessError
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.gau_pipeline import (
     add_common_audit_defaults,
     extract_js_endpoints,
@@ -87,6 +87,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--bodies-dir",
+        type=input_path,
         dest="bodies_dir_override",
         default="",
         help=(

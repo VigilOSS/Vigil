@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessError, AssessmentClient
-from assess.lib.config import Config, load_config
+from assess.lib.config import Config, input_path, load_config
 from assess.lib.scope import (
     host_admitted,
     host_from_token,
@@ -54,6 +54,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "input_file",
+        type=input_path,
         nargs="?",
         default="-",
         help="Input file with one URL/host per line, or '-' for stdin",

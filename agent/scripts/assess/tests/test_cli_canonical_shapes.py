@@ -1953,17 +1953,28 @@ def test_the_render_flag_lands_under_its_own_key_not_a_filter() -> None:
     assert values["status"] == "processing"
 
 
+@pytest.mark.parametrize("argv", [["--show-tokens", "--json"], ["--json", "--show-tokens"]])
+def test_the_render_flag_is_ignored_beside_json_which_already_carries_tokens(
+    argv: list[str], capsys
+) -> None:
+    """--json carries every row's lease_token, so asking for tokens too is
+    derived, not refused, in either order."""
+    values, output = _code_dispatch_cli()._parse_list_filters(argv)
+
+    assert output == "json"
+    assert _code_dispatch_cli()._LIST_SHOW_TOKENS_FIELD not in values
+    assert "--show-tokens" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--show-tokens", "--json"],
-        ["--json", "--show-tokens"],
         ["--show-tokens", "--ids-only"],
         ["--ids-only", "--show-tokens"],
         ["--show-tokens", "--show-tokens"],
     ],
 )
-def test_the_render_flag_is_refused_beside_a_mode_that_already_carries_it(
+def test_the_render_flag_is_refused_beside_a_mode_that_cannot_render_it(
     argv: list[str], capsys
 ) -> None:
     """Both orders, because a one-sided check is how `--json --show-tokens`

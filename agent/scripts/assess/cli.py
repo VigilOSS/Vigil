@@ -760,6 +760,9 @@ def main(argv: list[str] | None = None) -> None:
             if not args.command:
                 parser.print_help()
                 sys.exit(1)
+            from assess.lib.config import resolve_input_path_arguments
+
+            resolve_input_path_arguments(args)
 
             # --actor-kind only feeds activity-entry writers (currently `log`);
             # warn when the operator passes it for a subcommand that ignores

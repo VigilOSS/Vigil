@@ -1836,6 +1836,17 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
 
         start_client(install_root, engagement_dir, client, selected_mode, extra_args, no_autoprompt=no_autoprompt)
         return
+    opencode_variants: dict[str, str] = {}
+    opencode_variant_state = None
+    if client == "opencode":
+        # The launcher hands these flags to the OpenCode TUI, which rejects a model
+        # id carrying ``#variant``: split it off and save it as OpenCode's choice
+        # for that model, exactly as the web/code assessment start does. Read and
+        # validated here, before any side effect; written just before the exec.
+        from .assessment_clients import _opencode_model_variants, _opencode_variant_state
+
+        extra_args, opencode_variants = _opencode_model_variants(list(extra_args))
+        opencode_variant_state = _opencode_variant_state(opencode_variants)
     from .client_sessions import client_session_bootstrap, record_client_session
 
     with client_session_bootstrap(install_root, engagement_dir, concurrent=True) as refresh_shared:
@@ -1939,6 +1950,16 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
             "do not repeat source confirmation or dispatch duplicate workers merely because this client is new."
         )
         extra_args = [*flags, setup + (f"\n\nAdditional context:\n{message}" if message else "")]
+    if opencode_variant_state is not None:
+        from .assessment_clients import _write_opencode_variant_state
+
+        _write_opencode_variant_state(*opencode_variant_state)
+        for model, variant in opencode_variants.items():
+            print(
+                f"variant: {variant} for {model} (saved as OpenCode's choice for this model)",
+                file=sys.stderr,
+                flush=True,
+            )
     os.chdir(engagement_dir)
     from .client_sessions import record_client_launch
     record_client_launch(install_root, engagement_dir, client, selected_mode)

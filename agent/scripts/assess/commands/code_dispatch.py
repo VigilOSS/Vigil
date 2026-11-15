@@ -22,7 +22,7 @@ from assess.lib.client import (
     AssessmentClient,
     AssessTransportError,
 )
-from assess.lib.config import load_config
+from assess.lib.config import load_config, resolve_input_path
 from assess.lib.contracts import CODE_SKIP_REASONS
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.code_structural_identity import parse_code_file_page
@@ -90,7 +90,8 @@ _ACTION_HELP: dict[str, str] = {
         "the capability that spends the lease, so this is how a lane that lost "
         "it — compaction, a client restart, a subagent that did not persist it "
         "— reads it back and resumes heartbeat/record/done on the same attempt "
-        "instead of discarding the work. `--json` carries it unconditionally, "
+        "instead of discarding the work. `--json` carries it unconditionally (with "
+        "--json, --show-tokens adds nothing and is ignored), "
         "and `progress <item-id>` prints it for one row.\n"
         "--stale-minutes N narrows the page to processing rows whose lease has "
         "not proved life inside that window — the same abandonment measure "
@@ -246,7 +247,8 @@ _ACTION_HELP: dict[str, str] = {
         "[--origin depth_floor|cross_file] [--vuln-class FAMILY]... "
         "[--path-prefix PATH]... [--repo-id N] [--summary] [--limit N] [--offset N] "
         "[--all] [--include-superseded]\n\n"
-        "List triggers, defaulting to pending. stdout is the JSON row array that "
+        "List triggers, defaulting to pending; `all` lists every status, and a status no "
+        "trigger carries is refused with the statuses the backend writes. stdout is the JSON row array that "
         "requeue-triggers and resolve-triggers take unchanged, at most "
         f"{TRIGGER_PRINT_PAGE} rows unless --limit or --all says otherwise (--offset "
         "starts later in the selection); --summary prints only counts by origin x "
@@ -569,6 +571,7 @@ def _stats(cfg) -> None:
 
 
 def _ids_from_file(path_value: str) -> list[int]:
+    path_value = resolve_input_path(path_value)
     path = Path(path_value)
     is_process_descriptor = _PROCESS_DESCRIPTOR_PATH.fullmatch(path_value) is not None
     if not is_process_descriptor and not path.is_file():
@@ -857,7 +860,7 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
     show_tokens = False
 
     def _output_mode(token: str) -> bool:
-        """Consume one output-mode flag; the three refusals are its own."""
+        """Consume one output-mode flag; the refusals are its own."""
         nonlocal output, show_tokens
         if token == "--show-tokens":
             if show_tokens:
@@ -866,32 +869,26 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
-            if output != "table":
-                print(
-                    "ERROR: --show-tokens only renders the table; --json and "
-                    "--ids-only already carry every row value",
-                    file=sys.stderr,
-                )
-                raise SystemExit(1)
             show_tokens = True
-            return True
-        if token in {"--json", "--ids-only"}:
+        elif token in {"--json", "--ids-only"}:
             if output != "table":
                 print(
                     "ERROR: choose either --json or --ids-only, not both",
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
-            if show_tokens:
-                print(
-                    "ERROR: --show-tokens only renders the table; --json and "
-                    "--ids-only already carry every row value",
-                    file=sys.stderr,
-                )
-                raise SystemExit(1)
             output = "json" if token == "--json" else "ids"
-            return True
-        return False
+        else:
+            return False
+        if show_tokens and output == "ids":
+            print(
+                "ERROR: --ids-only prints item ids only, so it cannot show lease "
+                "tokens; use --json (every row carries its lease_token) or the "
+                "table with --show-tokens",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        return True
 
     values: dict[str, str | list[str]] = _parse_verb_options(
         tokens,
@@ -903,7 +900,13 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
         },
         switch=_output_mode,
     )
-    if show_tokens:
+    if show_tokens and output == "json":
+        print(
+            "note: --show-tokens ignored with --json; every JSON row already "
+            "carries its lease_token",
+            file=sys.stderr,
+        )
+    elif show_tokens:
         values[_LIST_SHOW_TOKENS_FIELD] = "1"
     return values, output
 
@@ -1737,6 +1740,7 @@ def _load_cwe_coverage(source: str) -> list:
     elif text.startswith(("[", "{")):
         raw, origin = text, "inline JSON"
     else:
+        source = resolve_input_path(source)
         path = Path(source)
         if not path.is_file():
             print(
@@ -2099,6 +2103,7 @@ def _needs_context(
 
     payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if expansion_file:
+        expansion_file = resolve_input_path(expansion_file, cfg.engagement_dir)
         ep = Path(expansion_file)
         if not ep.is_file():
             print(f"Expansion JSON file not found: {expansion_file}", file=sys.stderr)
@@ -2761,6 +2766,7 @@ def _queue(
     alongside the existing format; these are normalized (explicit priority
     validated, string lists flattened) before posting.
     """
+    queue_items_file = resolve_input_path(queue_items_file, cfg.engagement_dir)
     fp = Path(queue_items_file)
     if not fp.is_file():
         print(f"Queue items JSON file not found: {queue_items_file}", file=sys.stderr)
@@ -3147,6 +3153,7 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
     exit status: a batch that left any target blocked or any selector
     unresolved is not a success.
     """
+    triggers_file = resolve_input_path(triggers_file, cfg.engagement_dir)
     fp = Path(triggers_file)
     if not fp.is_file():
         print(f"Triggers JSON file not found: {triggers_file}", file=sys.stderr)
@@ -3528,6 +3535,7 @@ def _resolve_triggers(
     cfg, triggers_file: str, resolution_status: str | None, note: str, *, amend: bool = False
 ) -> None:
     """Resolve pending triggers, or with *amend* append to closed triggers' notes."""
+    triggers_file = resolve_input_path(triggers_file, cfg.engagement_dir)
     fp = Path(triggers_file)
     if not fp.is_file():
         print(f"Triggers JSON file not found: {triggers_file}", file=sys.stderr)

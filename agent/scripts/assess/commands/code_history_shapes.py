@@ -25,7 +25,7 @@ from assess.lib.code_history import (
     repo_relative_path,
 )
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
-from assess.lib.config import resolve_engagement_dir
+from assess.lib.config import input_path, resolve_engagement_dir
 from assess.lib.render_containment import append_contained_value
 
 _CWE = re.compile(r"^CWE-\d+$")
@@ -41,7 +41,7 @@ def register_check_shapes(subparsers) -> None:
         "check-shapes",
         help="Validate cve-bug-shapes.jsonl against the code-history receipts and patches it cites",
     )
-    parser.add_argument("shapes_path", metavar="jsonl", help="Path to cve-bug-shapes.jsonl")
+    parser.add_argument("shapes_path", type=input_path, metavar="jsonl", help="Path to cve-bug-shapes.jsonl")
     parser.add_argument("--json", dest="as_json", action="store_true", help="Emit the check as JSON.")
     parser.set_defaults(func=run_check_shapes)
 

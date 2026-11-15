@@ -20,7 +20,7 @@ import sys
 
 from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.code_record_input import fail
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
 
@@ -47,7 +47,7 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument("--metadata-inline", help="Inline JSON object stored on activity_entries.metadata")
-    p.add_argument("--metadata-file", help="Path to a JSON object stored on activity_entries.metadata")
+    p.add_argument("--metadata-file", type=input_path, help="Path to a JSON object stored on activity_entries.metadata")
     p.set_defaults(func=run)
 
 

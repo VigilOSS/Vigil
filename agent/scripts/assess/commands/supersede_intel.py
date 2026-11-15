@@ -27,7 +27,7 @@ import sys
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.code_record_input import fail
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.json_inputs import parse_json_argument
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
@@ -109,6 +109,7 @@ def register(subparsers) -> None:
     p.add_argument("intel_id", type=int, help="Backend id of the intel row being superseded")
     p.add_argument(
         "payload",
+        type=input_path,
         nargs="?",
         help="Path to the new intel JSON payload, or inline JSON object (omit when using --to-existing)",
     )

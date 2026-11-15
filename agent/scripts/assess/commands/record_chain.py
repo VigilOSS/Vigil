@@ -9,7 +9,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.code_record_input import fail
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 
 SCHEMA_NAME = "attack-chain.schema.json"
@@ -33,7 +33,7 @@ def _canonical_chain_key(title: str) -> str:
 def register(subparsers) -> None:
     p = subparsers.add_parser("record-chain", help="Record an attack chain")
     p.add_argument("agent_name", help="Agent name")
-    p.add_argument("json_file", help="Path to chain JSON file")
+    p.add_argument("json_file", type=input_path, help="Path to chain JSON file")
     p.set_defaults(func=run)
 
 

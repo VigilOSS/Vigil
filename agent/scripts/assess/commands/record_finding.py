@@ -17,7 +17,7 @@ from assess.lib.client import (
 )
 from assess.lib.code_record_input import fail
 from assess.lib.code_snapshot_binding import fill_binding
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contract_sections import refusal_sections
 from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, common_mistake_hints
 from assess.lib.exploit_targets import is_source_bound
@@ -44,7 +44,7 @@ def register(subparsers) -> None:
         epilog="See `vigil assess contract finding record` for the canonical payload shape and examples.",
     )
     p.add_argument("agent_name", help="Agent name (e.g. vulnerability-analyst)")
-    p.add_argument("json_file", help="Path to finding JSON file")
+    p.add_argument("json_file", type=input_path, help="Path to finding JSON file")
     p.add_argument(
         "--allow-unindexed-evidence",
         dest="allow_unindexed_evidence",
@@ -136,6 +136,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--next-test-file",
+        type=input_path,
         default="",
         help="Runtime proof plan JSON for the --pending-runtime-proof park: the same "
              "next_test object `finding verify --status pending_runtime_proof --next-test-file` "

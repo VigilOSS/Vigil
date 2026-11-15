@@ -7,7 +7,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.code_record_input import unwrap_request_envelope
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 
 
 def register(subparsers) -> None:
@@ -24,7 +24,7 @@ def register(subparsers) -> None:
         required=True,
         help="Exact sealed source manifest digest the threat model describes",
     )
-    p.add_argument("threat_model_json", help="Path to JSON file containing the threat model")
+    p.add_argument("threat_model_json", type=input_path, help="Path to JSON file containing the threat model")
     p.set_defaults(func=run)
 
 

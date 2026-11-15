@@ -8,7 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient, require_finding_write_response
 from assess.lib.code_record_input import fail
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contract_registry import FINDING_CHANGE_EFFECTS
 from assess.lib.contracts import FINDING_SEVERITIES, SUBMISSION_STATUSES, render_contract_epilog
 from assess.lib.evidence_ref import warn_evidence_ref
@@ -47,6 +47,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--payload-file",
+        type=input_path,
         dest="payload_file",
         help=(
             "Path to a JSON patch for one finding. --agent-id, --reason, --reason-code, "

@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contracts import render_contract_epilog
 from assess.lib.finding_render import warn_untrusted_data
 from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
@@ -145,7 +145,7 @@ def register(subparsers) -> None:
 
     # -- import-har -----------------------------------------------------------
     sp_import = action_sub.add_parser("import-har", help="Import flows from a HAR file.")
-    sp_import.add_argument("file", help="Path to the HAR file to import.")
+    sp_import.add_argument("file", type=input_path, help="Path to the HAR file to import.")
     sp_import.add_argument("--json", dest="as_json", action="store_true", help="Emit the raw JSON response.")
     sp_import.set_defaults(func=_run_import_har)
 

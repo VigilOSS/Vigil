@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contract_registry import NEXT_TEST_FIELDS
 from assess.lib.phases import resolve_track_phase
 from assess.lib.render_containment import contain_separators
@@ -41,7 +41,7 @@ def register(subparsers) -> None:
             traffic = action.add_mutually_exclusive_group(required=True)
             traffic.add_argument('--rate-budget', help='Per-specialist target-traffic budget, as for agent start.')
             traffic.add_argument('--no-target-traffic', action='store_true')
-            action.add_argument('--dispatch-file', help='Additional canonical DispatchCreate JSON, including instruction identity.')
+            action.add_argument('--dispatch-file', type=input_path, help='Additional canonical DispatchCreate JSON, including instruction identity.')
         if name == 'update':
             action.add_argument('--agent-id', required=True)
             action.add_argument('--status', required=True, choices=('claimed', 'blocked', 'finished'))

@@ -12,7 +12,7 @@ from assess.lib.code_record_input import (
     read_strict_object,
     sha256,
 )
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 
 
 _LABEL = "fuzz-decision"
@@ -34,7 +34,7 @@ def register(subparsers) -> None:
         "fuzz-decision",
         help="Record a generation-bound fuzz applicability decision",
     )
-    parser.add_argument("decision_json", help="Path to one decision JSON object, or '-'")
+    parser.add_argument("decision_json", type=input_path, help="Path to one decision JSON object, or '-'")
     parser.set_defaults(func=run)
 
 

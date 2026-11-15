@@ -12,7 +12,7 @@ from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observa
 from assess.lib.classify import classify_type
 from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES, classify_from_fields
 from assess.lib.client import AssessError, AssessmentClient
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.params import extract_url_path, generate_params_sig
 from assess.lib.scope import host_admitted, ingest_scope_filter
 
@@ -21,7 +21,7 @@ _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "tr
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("spec", help="Ingest OpenAPI/Swagger spec into assessment state")
-    p.add_argument("spec_file", help="Path to local spec file (no URLs)")
+    p.add_argument("spec_file", type=input_path, help="Path to local spec file (no URLs)")
     p.set_defaults(func=run)
 
 
@@ -196,15 +196,38 @@ def _param_example(param: dict) -> str:
 
 
 
-def _engagement_fallback_base(engagement_dir: str) -> str:
-    """Derive a sensible absolute base from the engagement scope (S10 fallback).
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
 
-    When a spec's ``servers`` url is relative (e.g. ``/api``) or missing, we
-    resolve it against the engagement's own target host so paths still ingest
-    instead of hard-exiting with zero coverage. Read-only use of the scope
-    helpers; CIDR / unresolvable entries are skipped in favour of a real host.
-    Returns ``""`` when no usable host can be found (caller WARNs and ingests
-    paths with relative URLs rather than dropping the spec).
+
+def _engagement_target_origin(engagement_dir: str) -> str:
+    """The ``scheme://host[:port]`` of the engagement's own target URL, or ``""``.
+
+    ``engagement.json`` ``target`` is the URL the operator started the
+    engagement against, so it carries the scheme and port a scope host lacks.
+    """
+    try:
+        manifest = json.loads((Path(engagement_dir) / "engagement.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(manifest, dict):
+        return ""
+    return _origin(str(manifest.get("target") or "").strip())
+
+
+def _engagement_fallback_base(engagement_dir: str) -> tuple[str, str]:
+    """Derive an absolute base for a spec without an absolute server URL.
+
+    Returns ``(base, derived_from)``; ``derived_from`` names the source so the
+    caller can say what it used. In order: the engagement target URL from
+    ``engagement.json`` (scheme and port kept), a scope.json URL entry (its
+    scheme and port), then a scope host with an assumed ``https`` scheme. A
+    host carved out by ``out_of_scope`` or outside the allowlist is never used.
+    Returns ``("", "")`` when nothing usable exists (the caller WARNs and
+    ingests paths with relative URLs rather than dropping the spec).
     """
     try:
         from assess.lib.scope import (
@@ -214,36 +237,55 @@ def _engagement_fallback_base(engagement_dir: str) -> str:
             scope_entries,
         )
     except Exception:  # pragma: no cover - defensive
-        return ""
+        return "", ""
     try:
         scope = load_scope(engagement_dir)
         entries = scope_entries(scope)
         deny = out_of_scope_entries(scope)
     except SystemExit:
-        return ""
+        return "", ""
     except Exception:  # pragma: no cover - defensive
-        return ""
+        return "", ""
+
+    def admitted(host: str) -> bool:
+        # Without an allowlist only an out_of_scope carve-out excludes a host.
+        if not host or "/" in host:
+            return False
+        if entries:
+            return host_admitted(host, entries, deny)
+        return not host_admitted(host, deny, [])
+
+    target = _engagement_target_origin(engagement_dir)
+    if target and admitted((urlparse(target).hostname or "").lower()):
+        return target, "engagement target (engagement.json)"
+    for entry in entries:
+        if entry.get("entry_kind") == "url":
+            origin = _origin(str(entry.get("scope_entry") or ""))
+            if origin and admitted((entry.get("host") or "").strip()):
+                return origin, f"scope.json URL entry '{entry.get('scope_entry')}'"
     for kind_filter in (("bare_host", "url", "wildcard"), ("cidr",)):
         for entry in entries:
             if entry.get("entry_kind") in kind_filter:
                 host = (entry.get("host") or "").strip()
-                # Skip a host carved out by an out_of_scope denylist entry so the
-                # fallback base never resolves to an OOS host. CIDR/wildcard
-                # apexes that aren't concrete admittable hosts fall through the
-                # allowlist check the same as before.
-                if host and "/" not in host and host_admitted(host, entries, deny):
-                    return f"https://{host}"
-    return ""
+                if admitted(host):
+                    return (
+                        f"https://{host}",
+                        f"scope.json host '{host}' (scheme https assumed; engagement.json "
+                        "has no in-scope target URL)",
+                    )
+    return "", ""
 
 
 def _resolve_base_url(spec: dict, spec_version: str, engagement_dir: str) -> str:
     """Resolve the spec base URL, tolerating relative/missing servers (S10).
 
     Never hard-exits. An absolute ``servers[0].url`` is used as-is; a RELATIVE
-    one (``/api``) is joined onto the engagement target host so its paths ingest
-    instead of failing the absolute-URL check and dropping the whole spec. If no
-    base can be derived at all, WARNs and returns ``""`` (paths still ingest with
-    relative URLs — degraded, but no silent loss of coverage).
+    one (``/api``) is joined onto the engagement base (see
+    :func:`_engagement_fallback_base`) so its paths ingest instead of failing
+    the absolute-URL check and dropping the whole spec, and stderr names the
+    base and where it came from. If no base can be derived at all, WARNs and
+    returns ``""`` (paths still ingest with relative URLs — degraded, but no
+    silent loss of coverage).
     """
     if spec_version == "3":
         servers = spec.get("servers") or []
@@ -253,13 +295,13 @@ def _resolve_base_url(spec: dict, spec_version: str, engagement_dir: str) -> str
         raw = raw.strip()
         if raw and raw.startswith(("http://", "https://")):
             return raw.rstrip("/")
-        fallback = _engagement_fallback_base(engagement_dir)
+        fallback, derived_from = _engagement_fallback_base(engagement_dir)
         if raw:
             if fallback:
                 joined = urljoin(fallback.rstrip("/") + "/", raw.lstrip("/"))
                 _warn(
-                    f"relative servers url '{raw}' resolved against engagement target "
-                    f"-> '{joined}'"
+                    f"relative servers url '{raw}' resolved against {derived_from} "
+                    f"'{fallback}' -> '{joined}'"
                 )
                 return joined.rstrip("/")
             _warn(
@@ -268,20 +310,36 @@ def _resolve_base_url(spec: dict, spec_version: str, engagement_dir: str) -> str
             )
             return raw.rstrip("/")
         if fallback:
-            _warn(f"spec has no absolute servers url; using engagement target '{fallback}'")
+            _warn(f"spec has no absolute servers url; using {derived_from} '{fallback}'")
             return fallback.rstrip("/")
         _warn("spec has no servers url and no engagement target host; ingesting relative URLs")
         return ""
 
     host = str(spec.get("host") or "").strip()
     base_path = str(spec.get("basePath") or "").strip()
-    schemes = spec.get("schemes") or ["https"]
-    scheme = schemes[0] if isinstance(schemes, list) and schemes else "https"
+    schemes = spec.get("schemes")
     if host:
+        if isinstance(schemes, list) and schemes:
+            scheme = str(schemes[0])
+        else:
+            # Swagger 2.0 defaults to the scheme the spec was served over; the
+            # engagement target says which one when it names the same host.
+            target = _engagement_target_origin(engagement_dir)
+            target_host = (urlparse(target).hostname or "") if target else ""
+            spec_host = (urlparse(f"//{host}").hostname or "")
+            if target and target_host == spec_host.lower():
+                scheme = urlparse(target).scheme
+                _warn(
+                    f"swagger spec declares no schemes; using the engagement target's "
+                    f"scheme '{scheme}' for host '{host}'"
+                )
+            else:
+                scheme = "https"
+                _warn(f"swagger spec declares no schemes; assuming https for host '{host}'")
         return f"{scheme}://{host}{base_path}".rstrip("/")
-    fallback = _engagement_fallback_base(engagement_dir)
+    fallback, derived_from = _engagement_fallback_base(engagement_dir)
     if fallback:
-        _warn(f"swagger spec has no host; using engagement target '{fallback}{base_path}'")
+        _warn(f"swagger spec has no host; using {derived_from} '{fallback}{base_path}'")
         return f"{fallback}{base_path}".rstrip("/")
     _warn("swagger spec has no host and no engagement target; ingesting relative URLs")
     return base_path.rstrip("/")

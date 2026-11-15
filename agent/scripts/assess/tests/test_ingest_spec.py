@@ -186,3 +186,63 @@ def test_ingest_spec_global_bypass_admits_outside_and_denied_base_host(
     rows = fake_client.row_for_url("https://api.out-of-scope.org/users")
     assert len(rows) == 1
     assert rows[0]["status"] == "pending"
+
+
+def _engagement_target(tmp_path, target: str) -> None:
+    (tmp_path / "engagement.json").write_text(
+        json.dumps({"key": "test-eng", "target": target}), encoding="utf-8"
+    )
+
+
+def test_relative_servers_url_keeps_engagement_target_scheme_and_port(
+    tmp_path, monkeypatch, capsys
+):
+    fake_client = FakeAssessmentClient()
+    _setup(tmp_path, monkeypatch, fake_client)
+    _engagement_target(tmp_path, "http://shop.example.com:3000")
+    spec_file = _write_spec(tmp_path, "/b2b/v2")
+
+    ingest_spec.run(_spec_ns(str(spec_file), str(tmp_path)))
+    err = capsys.readouterr().err
+
+    assert len(fake_client.row_for_url("http://shop.example.com:3000/b2b/v2/users")) == 1
+    assert "engagement target" in err
+    assert "http://shop.example.com:3000/b2b/v2" in err
+
+
+def test_relative_servers_url_uses_scope_url_entry_scheme_and_port(
+    tmp_path, monkeypatch, capsys
+):
+    fake_client = FakeAssessmentClient()
+    _setup(tmp_path, monkeypatch, fake_client)
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["http://shop.example.com:8080/"]}), encoding="utf-8"
+    )
+    spec_file = _write_spec(tmp_path, "/api")
+
+    ingest_spec.run(_spec_ns(str(spec_file), str(tmp_path)))
+    capsys.readouterr()
+
+    assert len(fake_client.row_for_url("http://shop.example.com:8080/api/users")) == 1
+
+
+def test_out_of_scope_engagement_target_is_not_used_as_base(tmp_path, monkeypatch, capsys):
+    fake_client = FakeAssessmentClient()
+    _setup(tmp_path, monkeypatch, fake_client)
+    _engagement_target(tmp_path, "http://elsewhere.example.org:3000")
+    spec_file = _write_spec(tmp_path, "/api")
+
+    base = ingest_spec._resolve_base_url(
+        json.loads(spec_file.read_text(encoding="utf-8")), "3", str(tmp_path)
+    )
+    capsys.readouterr()
+
+    assert "elsewhere.example.org" not in base
+
+
+def test_swagger_without_schemes_uses_engagement_target_scheme(tmp_path, monkeypatch, capsys):
+    _setup(tmp_path, monkeypatch, FakeAssessmentClient())
+    _engagement_target(tmp_path, "http://shop.example.com:3000")
+    spec = {"swagger": "2.0", "host": "shop.example.com:3000", "basePath": "/v1", "paths": {}}
+
+    assert ingest_spec._resolve_base_url(spec, "2", str(tmp_path)) == "http://shop.example.com:3000/v1"

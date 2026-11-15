@@ -31,6 +31,8 @@ from __future__ import annotations
 import json
 import sys
 
+from assess.lib.config import input_path
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
@@ -42,6 +44,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "records_file",
+        type=input_path,
         nargs="?",
         default=None,
         help=(

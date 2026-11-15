@@ -14,7 +14,7 @@ from assess.lib.client import (
 )
 from assess.lib.code_record_input import fail
 from assess.lib.code_snapshot_binding import fill_binding
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contract_registry import DECISION_CHECK_FIELDS
 from assess.lib.contracts import (
     FINDING_SEVERITIES,
@@ -64,6 +64,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--payload-file",
+        type=input_path,
         dest="payload_file",
         help=(
             "Path to a final JSON verification-transition payload. --agent-id "
@@ -155,14 +156,17 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--counter-check-file",
+        type=input_path,
         help="JSON file containing the completed structured false-positive counter-check",
     )
     p.add_argument(
         "--confirm-check-file",
+        type=input_path,
         help="JSON file containing the completed falsification check for confirmed/downgraded",
     )
     p.add_argument(
         "--next-test-file",
+        type=input_path,
         help=(
             "JSON file with the runtime proof plan {hypothesis, confirm_if, falsify_if, "
             "route_hint, prerequisites}. Required with --status pending_runtime_proof and "
@@ -171,6 +175,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--severity-variance-file",
+        type=input_path,
         help=(
             "JSON file with {\"reason\": \"...\"} saying why the severity departs from its "
             "CVSS band; the band, chosen severity, actor and decision receipt are derived "

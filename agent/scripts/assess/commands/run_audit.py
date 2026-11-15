@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.code_snapshot import RootedSourceTree, SourceSnapshotRaceError
-from assess.lib.config import Config, load_config
+from assess.lib.config import Config, input_path, load_config
 from assess.lib.finding_render import warn_untrusted_data
 from assess.lib.list_output import ListPage, report_page
 
@@ -59,13 +59,13 @@ def register(subparsers) -> None:
         "import", help="Import a source-inventory JSON document."
     )
     source_import.add_argument("run_id", type=int)
-    source_import.add_argument("payload_file")
+    source_import.add_argument("payload_file", type=input_path)
     source_import.set_defaults(func=_run_sources_import)
     source_commitment = source_actions.add_parser(
         "commitment",
         help="Compute exact per-target inventory commitments before starting a scan.",
     )
-    source_commitment.add_argument("payload_file")
+    source_commitment.add_argument("payload_file", type=input_path)
     source_commitment.set_defaults(func=_run_sources_commitment)
     _register_list(source_actions, _run_list)
 
@@ -101,14 +101,14 @@ def register(subparsers) -> None:
         "record", help="Record an obligation from a JSON document."
     )
     obligation_record.add_argument("run_id", type=int)
-    obligation_record.add_argument("payload_file")
+    obligation_record.add_argument("payload_file", type=input_path)
     obligation_record.set_defaults(func=_run_obligation_record)
     obligation_update = obligation_actions.add_parser(
         "update", help="Update an obligation from a JSON document."
     )
     obligation_update.add_argument("run_id", type=int)
     obligation_update.add_argument("obligation_id", type=int)
-    obligation_update.add_argument("payload_file")
+    obligation_update.add_argument("payload_file", type=input_path)
     obligation_update.set_defaults(func=_run_obligation_update)
     obligation_release = obligation_actions.add_parser(
         "release",
@@ -135,14 +135,14 @@ def register(subparsers) -> None:
         "record", help="Record a candidate from a JSON document."
     )
     candidate_record.add_argument("run_id", type=int)
-    candidate_record.add_argument("payload_file")
+    candidate_record.add_argument("payload_file", type=input_path)
     candidate_record.set_defaults(func=_run_candidate_record)
     candidate_update = candidate_actions.add_parser(
         "update", help="Update a candidate from a JSON document."
     )
     candidate_update.add_argument("run_id", type=int)
     candidate_update.add_argument("candidate_id", type=int)
-    candidate_update.add_argument("payload_file")
+    candidate_update.add_argument("payload_file", type=input_path)
     candidate_update.set_defaults(func=_run_candidate_update)
     _register_list(candidate_actions, _run_list)
     candidate_history = candidate_actions.add_parser(
@@ -177,7 +177,7 @@ def register(subparsers) -> None:
             "record", help="Record one JSON document."
         )
         record.add_argument("run_id", type=int)
-        record.add_argument("payload_file")
+        record.add_argument("payload_file", type=input_path)
         record.set_defaults(func=handler)
         _register_list(record_actions, _run_list)
 

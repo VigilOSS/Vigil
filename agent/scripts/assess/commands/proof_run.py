@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
 
 
@@ -47,9 +47,9 @@ def register(subparsers) -> None:
              "costs a read; discovering it at `finding verify` costs the whole proof run, "
              "target traffic included.",
     )
-    start.add_argument("--target-identity-file")
-    start.add_argument("--source-generations-file")
-    start.add_argument("--exclusions-file")
+    start.add_argument("--target-identity-file", type=input_path)
+    start.add_argument("--source-generations-file", type=input_path)
+    start.add_argument("--exclusions-file", type=input_path)
     start.add_argument(
         "--resume-from",
         type=int,

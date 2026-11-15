@@ -38,6 +38,7 @@ from assess.lib.vocabulary import word_folder
 from assess.lib.contracts import (
     BINDABLE_CLIENTS,
     MIXED_ASSESSMENT_ROLES,
+    current_dispatch_role,
     role_declares_no_skills,
 )
 from assess.lib.code_snapshot import engagement_sealed_source
@@ -538,7 +539,7 @@ def _continue(args) -> None:
         if not isinstance(packet, dict):
             print("agent continue: prior dispatch has no saved prompt packet", file=sys.stderr)
             raise SystemExit(2)
-        role = str(prior.get("agent_role") or "")
+        role = current_dispatch_role(prior.get("agent_role"), verb="agent continue")
         assessment_mode = _continuation_assessment_mode(
             role, prior.get("assessment_mode"), getattr(args, "assessment_mode", None)
         )
@@ -1802,7 +1803,7 @@ def _dispatch_skill_lines(value, role: str | None = None) -> list[str]:
     With names, one mandatory-read order covers every listed path. With none, the fallback tells
     the specialist to self-select and to record what it loaded -- the dispatch
     row is the only audit of that choice. A role the skills requirement exempts
-    gets neither instruction: `general` loads nothing by design, makes no tool
+    gets neither instruction: `blind-reviewer` loads nothing by design, makes no tool
     calls and does not write its own handoff, so telling it to pick skills and
     record them would contradict the role prompt in the same packet.
     """
@@ -2681,9 +2682,10 @@ def _start_swarm(args) -> None:
     front so command-run list / dispatch list show the full swarm
     immediately, even if the operator dispatches the workers staggered.
     """
-    role = getattr(args, "agent_role", None)
+    role = current_dispatch_role(getattr(args, "agent_role", None), verb="agent start-swarm")
     if not role:
         fail("agent start-swarm", "--role is required")
+    args.agent_role = role
     workers = getattr(args, "swarm_workers", None)
     batch_size = getattr(args, "swarm_batch_size", None)
     items_file = getattr(args, "swarm_items_file", None)

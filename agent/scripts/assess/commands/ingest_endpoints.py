@@ -34,7 +34,7 @@ from assess.lib.classify_buckets import (
     weak_tokens_for_key,
 )
 from assess.lib.client import AssessError, AssessmentClient
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.params import (
     extract_url_path,
     extract_query_params,
@@ -146,9 +146,10 @@ def _gf_coverage_candidates(
 def register(subparsers) -> None:
     p = subparsers.add_parser("endpoints", help="Ingest endpoint lines into assessment state")
     p.add_argument("source", help="Source name (e.g. recon, katana)")
-    p.add_argument("--file", dest="input_file", default=None, help="Read endpoints from file instead of stdin")
+    p.add_argument("--file", type=input_path, dest="input_file", default=None, help="Read endpoints from file instead of stdin")
     p.add_argument(
         "--egress-blocked-hosts",
+        type=input_path,
         dest="egress_blocked_hosts",
         default=None,
         help=(

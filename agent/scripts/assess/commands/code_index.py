@@ -49,7 +49,7 @@ from assess.lib.code_structural_metadata import (
     validated_callable_records,
     validated_structural_metadata,
 )
-from assess.lib.config import load_config, resolve_engagement_dir
+from assess.lib.config import input_path, load_config, resolve_engagement_dir
 from assess.lib.parser_boundary import (
     MAX_DEFAULT_PARSER_JOBS,
     ParserBoundaryCancelled,
@@ -126,7 +126,7 @@ def _register_build(subparsers) -> None:
         "build",
         help="Build a structural index for a sealed code-ingest snapshot",
     )
-    parser.add_argument("repo_path", metavar="snapshot", help="Sealed .../<digest>/source path")
+    parser.add_argument("repo_path", type=input_path, metavar="snapshot", help="Sealed .../<digest>/source path")
     parser.add_argument(
         "--repo-id",
         type=int,
@@ -142,6 +142,7 @@ def _register_build(subparsers) -> None:
     )
     parser.add_argument(
         "--file-list",
+        type=input_path,
         default=None,
         help=(
             "Optional complete JSON inventory to order/assert snapshot files; "

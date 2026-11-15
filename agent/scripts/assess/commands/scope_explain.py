@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.config import resolve_engagement_dir
+from assess.lib.config import input_path, resolve_engagement_dir
 from assess.lib.scope import (
     explain_target,
     load_scope,
@@ -36,6 +36,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "--input-file",
+        type=input_path,
         dest="input_file",
         default=None,
         help="Read additional URLs/hosts, one per line, from this file ('-' for stdin)",

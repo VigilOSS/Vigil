@@ -257,24 +257,9 @@ def record_credential(
             # A discovered credential auto-mints a candidate finding. Validate
             # that finding's immutable author before persisting the credential,
             # otherwise an author refusal would leave a half-bridged row behind.
-            existing_finding = connection.execute(
-                """
-                SELECT * FROM assessment_findings
-                WHERE engagement_id = ?
-                  AND defect_family = 'exposed-credential'
-                  AND root_cause_key = ?
-                  AND auth_context = 'unauthenticated'
-                  AND canonical_location = ?
-                  AND status != 'merged'
-                ORDER BY id
-                LIMIT 1
-                """,
-                (
-                    engagement.id,
-                    f"discovered-credential:{credential_key}",
-                    f"credential:{credential_key}",
-                ),
-            ).fetchone()
+            existing_finding = _existing_discovered_credential_finding(
+                connection, engagement.id, credential_key
+            )
             _findings._require_record_author_dispatch(
                 connection,
                 engagement.id,
@@ -319,6 +304,58 @@ def record_credential(
 
 
 # --- WS7: found-credential -> intel + minted-identity + candidate-finding bridge ---
+
+def _existing_discovered_credential_finding(connection, engagement_id: int, credential_key: str):
+    """The live candidate finding a discovered credential already bridged to."""
+    return connection.execute(
+        """
+        SELECT * FROM assessment_findings
+        WHERE engagement_id = ?
+          AND defect_family = 'exposed-credential'
+          AND root_cause_key = ?
+          AND auth_context = 'unauthenticated'
+          AND canonical_location = ?
+          AND status != 'merged'
+        ORDER BY id
+        LIMIT 1
+        """,
+        (
+            engagement_id,
+            f"discovered-credential:{credential_key}",
+            f"credential:{credential_key}",
+        ),
+    ).fetchone()
+
+
+def _discovered_credential_finding_source(
+    engagement_id: int, credential_key: str, provenance: dict[str, Any] | None
+) -> str:
+    """The finding attribution role for a discovered-credential candidate.
+
+    A credential's ``source_name`` says where the secret came from (a bundle, a
+    response body, a tool), while a finding's ``source_name`` is the authoring
+    role whose prefix the canonical slug carries. A re-record keeps the bridged
+    finding's attribution; a new finding takes the role of the authoring
+    dispatch (``provenance.agent_id``, already resolved by ``record_credential``).
+    A role without a finding prefix is attributed to ``operator`` so the slug is
+    still canonical; ``provenance.agent_id`` keeps the real author.
+    """
+    author = str((provenance or {}).get("agent_id") or "").strip()
+    with _common.get_connection() as connection:
+        existing = _existing_discovered_credential_finding(
+            connection, engagement_id, credential_key
+        )
+        if existing is not None and str(existing["source_name"] or ""):
+            return str(existing["source_name"])
+        row = connection.execute(
+            "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement_id, author),
+        ).fetchone()
+    role = str(row["agent_role"] or "").strip() if row is not None else ""
+    if role in _findings._FINDING_PREFIX_BY_SOURCE:
+        return role
+    return "operator"
+
 
 # Credential ``kind`` values (case-insensitive) that name a bearer/token secret
 # outright, so a non-JWT opaque bearer still mints a replayable identity.
@@ -507,7 +544,9 @@ def _flag_discovered_credential_finding(
         summary=summary,
         evidence_ref="",
         notes="",
-        source_name=source_name or "operator",
+        source_name=_discovered_credential_finding_source(
+            engagement_id, credential_key, finding_provenance
+        ),
         details=details,
         provenance=finding_provenance,
         request_variant_id=None,

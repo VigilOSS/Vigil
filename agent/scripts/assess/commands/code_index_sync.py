@@ -32,7 +32,7 @@ from assess.lib.code_structural_identity import (
     structural_indexer_digest,
     structural_input_digest,
 )
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.commands.code_index import _unsupported_index, structural_manifest_location
 from assess.lib.code_structural_metadata import (
     INVALID_ARTIFACT_REASON,
@@ -55,11 +55,13 @@ def register_sync(subparsers) -> None:
     )
     parser.add_argument(
         "--manifest",
+        type=input_path,
         default=None,
         help="Aggregate structural-index-manifest.json path",
     )
     parser.add_argument(
         "--index-dir",
+        type=input_path,
         default=None,
         help="Structural-index root (default: sibling structural-index directory)",
     )

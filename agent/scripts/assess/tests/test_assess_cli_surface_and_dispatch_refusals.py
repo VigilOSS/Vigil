@@ -34,7 +34,7 @@ from assess.lib.parser_boundary import MAX_DEFAULT_PARSER_JOBS
 # --------------------------------------------------------------------------- #
 
 _EXPECTED_LEAF_COUNT = 201
-_EXPECTED_TREE_DIGEST = "a85ac26a40104cf6dd6074589a08eed5fcd54f1d873f290ee891396c5a7a68d8"
+_EXPECTED_TREE_DIGEST = "41cc46ec75b7d6b9d20bdc0e7a82d69c0a093bf57d418b96ae563fd81e92f264"
 
 
 def _stable(value: object) -> object:
@@ -148,7 +148,7 @@ _KALI_BESPOKE_VERBS = ("sweep-orphans", "sweep", "tool-help", "gf")
 _KALI_INLINE_VERBS = ("job", "exec", "browser")
 _EXPECTED_CONTRACT_NAME_COUNT = 154
 _EXPECTED_EPILOG_COUNT = 91
-_EXPECTED_CONTRACT_DIGEST = "58cedbdb6f77c689076bbf99e8482393f02423030f8436183a0248a55283ef1c"
+_EXPECTED_CONTRACT_DIGEST = "1c8e4876cd67c49492ef2d2272b04514c9b669ebd76628a05a5aefee280fe7f3"
 
 
 def _renderable_contract_names() -> list[str]:
@@ -285,8 +285,8 @@ _RELEASE_REQUIRED = (
     "record of why this file was handed back with no verdict"
 )
 _SHOW_TOKENS_CONFLICT = (
-    "ERROR: --show-tokens only renders the table; --json and --ids-only "
-    "already carry every row value"
+    "ERROR: --ids-only prints item ids only, so it cannot show lease tokens; "
+    "use --json (every row carries its lease_token) or the table with --show-tokens"
 )
 
 
@@ -339,9 +339,8 @@ def _refusal(capsys, parser, tokens: list[str]) -> str:
         ("list", ["--show-tokens", "--show-tokens"], "ERROR: --show-tokens was specified more than once"),
         ("list", ["--json", "--ids-only"], "ERROR: choose either --json or --ids-only, not both"),
         ("list", ["--ids-only", "--json"], "ERROR: choose either --json or --ids-only, not both"),
-        ("list", ["--json", "--show-tokens"], _SHOW_TOKENS_CONFLICT),
-        ("list", ["--show-tokens", "--json"], _SHOW_TOKENS_CONFLICT),
         ("list", ["--show-tokens", "--ids-only"], _SHOW_TOKENS_CONFLICT),
+        ("list", ["--ids-only", "--show-tokens"], _SHOW_TOKENS_CONFLICT),
         ("fetch", ["--nope", "1"], "Unknown or incomplete code-dispatch fetch option: --nope"),
         ("fetch", ["--repo-id"], "Unknown or incomplete code-dispatch fetch option: --repo-id"),
         ("fetch", ["--repo-id", "x"], "--repo-id must be an integer"),

@@ -37,7 +37,7 @@ from assess.lib.code_snapshot import (
     capture_regular_file,
     validate_repo_key,
 )
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.contracts import CODE_REPO_ROLES
 from assess.lib.security_history import SECURITY_HISTORY_GIT_GREP
 from assess.lib.trusted_exec import (
@@ -571,7 +571,7 @@ def register(subparsers) -> None:
             "`vigil assess code-coverage` reports their coverage and binding state."
         ),
     )
-    p.add_argument("repo_path", help="Path to the repository root")
+    p.add_argument("repo_path", type=input_path, help="Path to the repository root")
     p.add_argument("--name", default=None, help="Repository name (default: directory basename)")
     p.add_argument("--language", default=None, help="Override repository primary language (does NOT auto-tag unknown files; use --default-language-for-unknown for that)")
     p.add_argument(

@@ -271,3 +271,52 @@ def test_operator_known_credential_no_bridge(client, isolate_settings):
     assert record["identity"] == ""
     assert _credential_findings(eng_id) == []
     assert credential_store.load_identities(eng_id)["identities"] == {}
+
+
+@pytest.mark.parametrize(
+    ("agent_role", "expected_prefix", "expected_source"),
+    [
+        # The authoring dispatch's role names the finding prefix, not the
+        # credential's free-text origin.
+        ("source-analyzer", "SA-", "source-analyzer"),
+        # A role without a finding prefix still gets a canonical slug.
+        ("blind-reviewer", "OP-", "operator"),
+    ],
+)
+def test_discovered_credential_finding_slug_is_canonical(
+    client, isolate_settings, agent_role, expected_prefix, expected_source
+) -> None:
+    from app.services.search import is_canonical_finding_slug
+
+    key = f"2026-07-03-000006-disc-canonical-{agent_role}"
+    eng_id = _seed(client, isolate_settings, key)
+    author = f"{agent_role.upper()}-CRED-1"
+    dispatch = client.post(
+        f"/engagements/{key}/assessment/dispatches",
+        json={
+            "agent_id": author,
+            "agent_role": agent_role,
+            "task": "mine bundles",
+            "assessment_mode": "web",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+
+    record = state_manager.record_credential(
+        eng_id,
+        credential_key="bundle-test-login",
+        kind="password",
+        principal="tester@acme.example",
+        secret="hunter2",
+        source_name="main.js bundle comment",
+        status_value="discovered",
+        notes="",
+        provenance={"agent_id": author},
+    )
+
+    [finding] = _credential_findings(eng_id)
+    assert is_canonical_finding_slug(finding["slug"]), finding["slug"]
+    assert finding["slug"].startswith(expected_prefix)
+    assert finding["source_name"] == expected_source
+    assert finding["provenance"]["agent_id"] == author
+    assert _obj(record["provenance_json"])["candidate_finding_slug"] == finding["slug"]

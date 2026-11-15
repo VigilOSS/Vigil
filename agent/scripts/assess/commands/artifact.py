@@ -25,7 +25,7 @@ from assess.lib.client import (
     require_write_result,
 )
 from assess.lib.code_record_input import fail
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.finding_render import warn_untrusted_data
 from assess.lib.producer_identity import resolve_report_writer
 from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
@@ -116,6 +116,7 @@ def register(subparsers) -> None:
     )
     sp_register.add_argument(
         "--paths-file",
+        type=input_path,
         dest="paths_file",
         default="",
         metavar="PATH",

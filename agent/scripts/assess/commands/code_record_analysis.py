@@ -9,7 +9,7 @@ from pathlib import Path
 
 from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 
 
 def _validate_cwe_coverage(item_index: int, result: dict) -> list[str]:
@@ -339,6 +339,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "analysis_json",
+        type=input_path,
         help="Path to JSON file with a single result object or array of result objects",
     )
     p.set_defaults(func=run)

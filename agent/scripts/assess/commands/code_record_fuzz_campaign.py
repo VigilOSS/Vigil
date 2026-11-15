@@ -13,7 +13,7 @@ from assess.lib.code_record_input import (
     read_strict_object,
     sha256,
 )
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 
 
 _LABEL = "fuzz-campaign"
@@ -49,7 +49,7 @@ def register(subparsers) -> None:
         "fuzz-campaign",
         help="Record one generation- and dispatch-bound terminal fuzz campaign receipt",
     )
-    parser.add_argument("receipt_json", help="Path to one receipt JSON object, or '-'")
+    parser.add_argument("receipt_json", type=input_path, help="Path to one receipt JSON object, or '-'")
     parser.set_defaults(func=run)
 
 
