@@ -599,11 +599,13 @@ def start_runtime(
     validate_tools: bool = True,
     allow_existing: bool = False,
     prepare_image: bool = True,
+    refresh_provider_config: bool = True,
 ) -> None:
     with (service_start_lock(f"runtime:{options.container_name}"),
           service_start_lock(f"runtime-image:{options.image}")):
         _start_runtime_locked(options, runner=runner, validate_tools=validate_tools,
-                              allow_existing=allow_existing, prepare_image=prepare_image)
+                              allow_existing=allow_existing, prepare_image=prepare_image,
+                              refresh_provider_config=refresh_provider_config)
 
 
 def _start_runtime_locked(
@@ -613,6 +615,7 @@ def _start_runtime_locked(
     validate_tools: bool,
     allow_existing: bool,
     prepare_image: bool,
+    refresh_provider_config: bool,
 ) -> None:
     install_root = options.install_root.expanduser().resolve()
     data_dir = _resolve_runtime_data_dir(install_root)
@@ -672,7 +675,9 @@ def _start_runtime_locked(
         # Refresh subfinder's on-disk provider-config from the running container's
         # env vars so a `.env` key edit followed by `vigil up` takes effect without
         # a recreate. Fail-open (WARN only) — never blocks an already-running runtime.
-        generate_subfinder_provider_config(options.container_name, runner=runner)
+        # Per-call reuse from a tool run skips it, so its WARN is not in every result.
+        if refresh_provider_config:
+            generate_subfinder_provider_config(options.container_name, runner=runner)
         # extra_hosts are fixed at creation, so a .local replica scoped since this
         # container came up is unreachable until a recreate — surface that rather
         # than let a tool silently fail to resolve it.

@@ -181,3 +181,22 @@ def test_detached_job_finishes_after_its_launching_client_exits(tmp_path):
             except ProcessLookupError:
                 pass
             socket_directory.cleanup()
+
+
+@pytest.mark.parametrize("already_running", [True, False])
+def test_reused_runtime_skips_the_subfinder_provider_refresh(tmp_path, monkeypatch, already_running):
+    """Each tool call reuses the runtime; only a fresh start rewrites subfinder's
+    provider config, so its keyless warning is not prepended to every result."""
+    from vigil_cli import runtime
+    running = already_running
+    calls = []
+    monkeypatch.setenv("VIGIL_INSTALL_DIR", str(tmp_path))
+    monkeypatch.setenv("VIGIL_RUNTIME_CONTAINER", "vigil")
+    def start(options, **kwargs):
+        nonlocal running
+        calls.append(kwargs)
+        running = True
+    monkeypatch.setattr(runtime, "start_runtime", start)
+    monkeypatch.setattr(kali_runtime_exec.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout="vigil\n" if running else "", stderr=""))
+    kali_runtime_exec._check_container_running("vigil")
+    assert calls[0]["refresh_provider_config"] is (not already_running)

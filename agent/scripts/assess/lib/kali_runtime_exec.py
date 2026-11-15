@@ -299,6 +299,8 @@ def _check_container_running(container_name: str) -> None:
                 start_runtime(
                     RuntimeOptions(install_root=install_root, container_name=container_name),
                     allow_existing=True,
+                    # A fresh start writes subfinder's provider config; reuse keeps it.
+                    refresh_provider_config=not running,
                 )
         except (OSError, SystemExit) as exc:
             raise AssessError(f"Could not start managed runtime '{container_name}': {exc}") from exc
