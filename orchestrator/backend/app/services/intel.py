@@ -290,10 +290,15 @@ def _record_intel_row(
     in every ``record_*`` helper, so a family cannot key its write one way and
     its search index another. The caller still owns its own validation, its
     own ``values`` dict and its own FTS ``key``/``body_parts``.
+
+    The record carries ``write_outcome``: ``created`` for a new row, ``updated``
+    when the natural key matched an existing row and this write replaced its
+    values in place.
     """
 
     spec = _INTEL_TYPE_BY_SLUG[intel_type]
     with _use_connection(_conn) as connection:
+        existing = _natural_key_row(connection, spec, engagement.id, values)
         row = _generic_upsert(
             connection,
             table=spec.table,
@@ -310,7 +315,20 @@ def _record_intel_row(
             body=_compose_body(*body_parts),
             source_name=source_name,
         )
-    return _post_process_intel_row(intel_type, row)
+    record = _post_process_intel_row(intel_type, row)
+    record["write_outcome"] = "created" if existing is None else "updated"
+    return record
+
+
+def _natural_key_row(
+    connection, spec: _IntelType, engagement_id: int, values: dict[str, Any]
+) -> Any | None:
+    """The stored row ``values`` would UPSERT into, or None for a new row."""
+    where = " AND ".join(f"{col} = ?" for col in spec.natural_key)
+    return connection.execute(
+        f"SELECT * FROM {spec.table} WHERE engagement_id = ? AND {where}",
+        (engagement_id, *(values[col] for col in spec.natural_key)),
+    ).fetchone()
 
 
 # ── Record helpers ─────────────────────────────────────────
@@ -330,6 +348,16 @@ def record_tech_component(
     provenance: dict[str, Any] | None = None,
     _conn: Any | None = None,
 ) -> dict[str, Any]:
+    """UPSERT a tech-component row on (component, version).
+
+    A re-record replaces the stored values, except that the WAF measurements
+    the row already holds are merged with this write's
+    (:func:`merge_waf_measurements`): a component recorded once per measured
+    host keeps every host and the run that measured it. An update reports the
+    merge as ``waf_merge`` when either side records a measurement.
+    """
+    from .state_manager.coverage_readiness import merge_waf_measurements
+
     engagement = _engagement_or_404(engagement_id)
     values: dict[str, Any] = {
         "component": component,
@@ -338,22 +366,38 @@ def record_tech_component(
         "confidence": confidence,
         "evidence_ref": evidence_ref,
         "notes": notes,
-        "provenance_json": _json_text(provenance),
     }
     # Only override default CURRENT_TIMESTAMP when the caller supplied a value.
     if first_seen_at:
         values["first_seen_at"] = first_seen_at
     if last_seen_at:
         values["last_seen_at"] = last_seen_at
-    return _record_intel_row(
-        "tech-component",
-        engagement,
-        values,
-        key=f"{component} {version}".strip(),
-        body_parts=(component, version, confidence, evidence_ref, notes,),
-        source_name=source_name,
-        _conn=_conn,
-    )
+    with _use_connection(_conn) as connection:
+        # The merge reads the stored provenance before writing it back; hold the
+        # write lock across both so a concurrent record cannot drop a host.
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        spec = _INTEL_TYPE_BY_SLUG["tech-component"]
+        existing = _natural_key_row(connection, spec, engagement.id, values)
+        waf_merge = None
+        stored_provenance = provenance
+        if existing is not None:
+            stored_provenance, waf_merge = merge_waf_measurements(
+                _decode_json(existing["provenance_json"] or "{}", {}), provenance or {}
+            )
+        values["provenance_json"] = _json_text(stored_provenance)
+        record = _record_intel_row(
+            "tech-component",
+            engagement,
+            values,
+            key=f"{component} {version}".strip(),
+            body_parts=(component, version, confidence, evidence_ref, notes,),
+            source_name=source_name,
+            _conn=connection,
+        )
+    if waf_merge is not None:
+        record["waf_merge"] = waf_merge
+    return record
 
 
 def record_person(

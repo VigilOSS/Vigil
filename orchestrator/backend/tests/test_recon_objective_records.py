@@ -471,3 +471,130 @@ def test_wafw00f_value_flags_mirror_the_cli_target_parser():
     from app.services.state_manager.coverage_readiness import WAFW00F_VALUE_FLAGS
 
     assert WAFW00F_VALUE_FLAGS == kali_audit._WAFW00F_VALUE_FLAGS
+
+
+# ---------------------------------------------------------------------------
+# waf_tier: per-host measurements recorded under one component
+# ---------------------------------------------------------------------------
+
+
+def test_per_host_measurements_under_one_component_merge_and_each_closes_its_host(
+    client, engagement_id
+):
+    hosts = ["api.example.com", "www.example.com", "admin.example.com"]
+    runs = {}
+    for host in hosts:
+        _service(engagement_id, host)
+        runs[host] = _command_run(client, "wafw00f", f"https://{host}")
+
+    replies = [_measure(client, runs[host], [host]) for host in hosts]
+
+    assert [reply.status_code for reply in replies] == [201, 201, 201]
+    bodies = [reply.json() for reply in replies]
+    row_id = bodies[0]["id"]
+    assert {body["id"] for body in bodies} == {row_id}
+    assert bodies[0]["write_outcome"] == "created"
+    assert [body["write_outcome"] for body in bodies[1:]] == ["updated", "updated"]
+    merge = bodies[2]["waf_merge"]
+    assert merge["added_hosts"] == ["admin.example.com"]
+    assert merge["kept_hosts"] == ["api.example.com", "www.example.com"]
+    assert merge["remeasured_hosts"] == []
+    # Each host keeps the run that measured it.
+    measured = {entry["host"]: entry["command_run_id"] for entry in merge["measured_hosts"]}
+    assert measured == runs
+
+    rows = _by_host(client)
+    for host in hosts:
+        cell = rows[host]["outcomes"]["waf_tier"]
+        assert cell["met"] is True, host
+        assert cell["waf_detected"] is False
+        assert any(f"run #{runs[host]}" in item for item in cell["evidence"]), cell
+        other_runs = {runs[other] for other in hosts if other != host}
+        assert not any(f"run #{run}" in item for run in other_runs for item in cell["evidence"])
+
+
+def test_remeasuring_a_host_replaces_its_earlier_run(client, engagement_id):
+    _service(engagement_id, "api.example.com")
+    _service(engagement_id, "www.example.com")
+    first = _command_run(client, "wafw00f", "https://api.example.com")
+    other = _command_run(client, "wafw00f", "https://www.example.com")
+    second = _command_run(client, "wafw00f", "https://api.example.com")
+    _measure(client, first, ["api.example.com"])
+    _measure(client, other, ["www.example.com"])
+
+    reply = _measure(client, second, ["api.example.com"])
+
+    assert reply.status_code == 201, reply.text
+    merge = reply.json()["waf_merge"]
+    assert merge["remeasured_hosts"] == ["api.example.com"]
+    assert merge["kept_hosts"] == ["www.example.com"]
+    rows = _by_host(client)
+    evidence = rows["api.example.com"]["outcomes"]["waf_tier"]["evidence"]
+    assert any(f"run #{second}" in item for item in evidence)
+    assert not any(f"run #{first}" in item for item in evidence)
+    assert rows["www.example.com"]["outcomes"]["waf_tier"]["met"] is True
+
+
+def test_rerecording_a_component_without_a_measurement_keeps_its_measured_hosts(
+    client, engagement_id
+):
+    _service(engagement_id, "api.example.com")
+    run_id = _command_run(client)
+    _measure(client, run_id, ["api.example.com"], verdict="detected")
+
+    reply = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "Generic WAF", "source_name": "whatweb", "confidence": "medium"},
+    )
+
+    assert reply.status_code == 201, reply.text
+    body = reply.json()
+    assert body["write_outcome"] == "updated"
+    assert body["waf_merge"]["kept_hosts"] == ["api.example.com"]
+    cell = _by_host(client)["api.example.com"]["outcomes"]["waf_tier"]
+    assert cell["met"] is True
+    assert cell["waf_detected"] is True
+
+
+def test_carried_measurement_whose_run_did_not_target_its_host_is_refused(
+    client, engagement_id
+):
+    run_id = _command_run(client, "wafw00f", "https://api.example.com")
+    other = _command_run(client, "wafw00f", "https://www.example.com")
+
+    response = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={
+            "component": "WAF: none detected",
+            "provenance": {
+                "command_run_id": run_id,
+                "waf": {"verdict": "none_detected", "hosts": ["api.example.com"]},
+                "waf_measurements": [
+                    {"verdict": "none_detected", "hosts": ["admin.example.com"], "command_run_id": other},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert "admin.example.com" in response.json()["detail"]
+
+
+def test_cli_record_schema_accepts_a_merged_row_provenance(client, engagement_id):
+    """The provenance a merged row stores validates against the CLI schema, so a
+    caller can send a row it read back through record, update or supersede."""
+    from assess.lib.schema_validation import collect_validation_errors, load_schema
+
+    api_run = _command_run(client, "wafw00f", "https://api.example.com")
+    www_run = _command_run(client, "wafw00f", "https://www.example.com")
+    _measure(client, api_run, ["api.example.com"])
+    stored = _measure(client, www_run, ["www.example.com"]).json()
+    assert stored["provenance"]["waf_measurements"] == [
+        {"verdict": "none_detected", "hosts": ["api.example.com"], "command_run_id": api_run}
+    ]
+
+    schema = load_schema("intel-tech-component.schema.json")
+    payload = {"component": stored["component"], "provenance": stored["provenance"]}
+    assert collect_validation_errors(payload, schema) == []
+    payload["provenance"]["waf_measurements"][0]["vendor"] = "x"
+    assert collect_validation_errors(payload, schema)

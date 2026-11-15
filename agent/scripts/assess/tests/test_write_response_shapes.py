@@ -193,3 +193,81 @@ def test_intel_supersede_rejects_an_unreadable_or_wrong_canonical_receipt(
                 engagement_dir=str(tmp_path),
             )
         )
+
+
+def _run_record(tmp_path, monkeypatch, intel_type: str, payload: dict, response: dict) -> None:
+    payload_file = tmp_path / f"{intel_type}.json"
+    payload_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    class _Client(StubClient):
+        def post_engagement(self, _endpoint: str, _payload: dict) -> dict:
+            return response
+
+        def post_event(self, _payload: dict) -> dict:
+            return {}
+
+    monkeypatch.setattr(record_intel, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        record_intel,
+        "load_config",
+        lambda _directory: SimpleNamespace(base_url="http://backend", engagement_key="eng"),
+    )
+    record_intel.run(
+        SimpleNamespace(
+            intel_type=intel_type,
+            json_file=str(payload_file),
+            dry_run=False,
+            engagement_dir=str(tmp_path),
+        )
+    )
+
+
+def test_intel_record_reports_dedup_into_an_existing_row(tmp_path, monkeypatch, capsys):
+    _run_record(
+        tmp_path,
+        monkeypatch,
+        "tech-component",
+        {"component": "nginx", "version": "1.25"},
+        {"id": 41, "component": "nginx", "version": "1.25", "write_outcome": "updated"},
+    )
+
+    out = capsys.readouterr().out
+    assert "deduplicated into existing id=41" in out
+    assert "component+version" in out
+
+
+def test_intel_record_reports_the_waf_hosts_a_dedup_merged(tmp_path, monkeypatch, capsys):
+    _run_record(
+        tmp_path,
+        monkeypatch,
+        "tech-component",
+        {
+            "component": "WAF: none detected",
+            "provenance": {
+                "command_run_id": 9,
+                "waf": {"verdict": "none_detected", "hosts": ["www.example.com"]},
+            },
+        },
+        {
+            "id": 12,
+            "component": "WAF: none detected",
+            "version": "",
+            "write_outcome": "updated",
+            "waf_merge": {
+                "added_hosts": ["www.example.com"],
+                "remeasured_hosts": [],
+                "kept_hosts": ["api.example.com"],
+                "measured_hosts": [
+                    {"host": "api.example.com", "verdict": "none_detected", "command_run_id": 8},
+                    {"host": "www.example.com", "verdict": "none_detected", "command_run_id": 9},
+                ],
+            },
+        },
+    )
+
+    out = capsys.readouterr().out
+    assert "deduplicated into existing id=12" in out
+    merge_line = next(line for line in out.splitlines() if "WAF measurements merged" in line)
+    assert "added www.example.com" in merge_line
+    assert "kept api.example.com" in merge_line
+    assert "vigil assess intel get tech-component 12" in merge_line

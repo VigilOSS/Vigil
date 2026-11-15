@@ -943,13 +943,25 @@ def fetch_prior_dispatches(
 # ---------------------------------------------------------------------------
 # Host extraction helpers
 # ---------------------------------------------------------------------------
+#: Request methods a ``METHOD URL`` descriptor leads with (``post/patch/delete``
+#: joins several). Mirror of the backend ``coverage_readiness.HTTP_METHOD_TOKENS``.
+_HTTP_METHOD_TOKENS: frozenset[str] = frozenset(
+    {"get", "post", "put", "patch", "delete", "head", "options", "trace", "connect"}
+)
+
+
 def _endpoint_host(endpoint: str) -> str:
     """Return the lowercased host portion of a service endpoint / surface
-    target descriptor."""
+    target descriptor, reading past a leading request method to its URL."""
     raw = (endpoint or "").strip().lower()
     if not raw:
         return ""
-    first = raw.split()[0]
+    tokens = raw.split()
+    first = tokens[0]
+    if all(part in _HTTP_METHOD_TOKENS for part in first.split("/")):
+        if len(tokens) < 2:
+            return ""
+        first = tokens[1]
     if "://" in first:
         return host_from_token(first)
     ipv6_host = _ipv6_endpoint_host(first)
@@ -1552,10 +1564,16 @@ def annotate_by_host_payload(payload: dict[str, Any]) -> dict[str, Any]:
     engagement_signals = (
         payload.get("engagement_signals") if isinstance(payload, dict) else None
     )
+    excluded = payload.get("excluded_host_values") if isinstance(payload, dict) else None
     return {
         "objectives": objectives,
         "hosts": hosts,
         "engagement_signals": engagement_signals if isinstance(engagement_signals, dict) else {},
+        # Values the backend refused as hosts (a bare path, an HTTP method, a
+        # glob, a single label, an unscoped loopback name), listed in full.
+        "excluded_host_values": [
+            entry for entry in (excluded if isinstance(excluded, list) else []) if isinstance(entry, dict)
+        ],
     }
 
 
@@ -1642,8 +1660,20 @@ def render_per_host_section(section: dict[str, Any], warnings: list[str]) -> lis
     hosts = section.get("hosts", [])
     objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
     discovered_summary = section.get("discovered_summary")
+    excluded = section.get("excluded_host_values") or []
     lines.append("")
     lines.append("per-host coverage outcomes (C40 — WARN-only):")
+    if excluded:
+        reasons: dict[str, int] = {}
+        for entry in excluded:
+            reason = str(entry.get("reason") or "not a host")
+            reasons[reason] = reasons.get(reason, 0) + 1
+        breakdown = "; ".join(f"{count} {reason}" for reason, count in sorted(reasons.items()))
+        lines.append(
+            f"  ~ {len(excluded)} service/surface/deferral value(s) excluded from the host set "
+            f"as not hosts ({breakdown}). Rerun with --json to list each one under "
+            "per_host_coverage.excluded_host_values (source, id, value, reason)."
+        )
     if not hosts and not discovered_summary:
         lines.append("  (no hosts with backend signal — recon dispatch is the next step)")
         return lines
@@ -1675,7 +1705,7 @@ def render_per_host_section(section: dict[str, Any], warnings: list[str]) -> lis
             or "—"
         )
         lines.append(
-            f"  + {count} discovered host(s) from wildcard expansion: "
+            f"  + {count} discovered host(s) outside the scope literals: "
             f"{with_unmet} unmet, {with_deferral} with deferrals. "
             f"top unmet objectives: {top_unmet_str}. "
             "Pass --include-discovered for the full matrix."

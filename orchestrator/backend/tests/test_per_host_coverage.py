@@ -654,3 +654,77 @@ def test_report_readiness_per_host_coverage_embeds_scope_hosts(client, seeded_en
     assert "per_host_coverage" in body
     assert "scope_hosts" in body["per_host_coverage"]
     assert isinstance(body["per_host_coverage"]["scope_hosts"], list)
+
+
+# ---------------------------------------------------------------------------
+# The host set holds hosts only
+# ---------------------------------------------------------------------------
+
+
+def test_per_host_coverage_host_set_admits_only_hostnames_and_lists_the_rest(
+    client, seeded_engagement
+):
+    descriptors = [
+        "GET /api2/entities/v1",
+        "post/patch/delete https://app.target.example/api2/jobs/v1",
+        "patch https://app.target.example/api2/reports/v1",
+        "/api2/recon/queries/domains/v1",
+        "assets.target.example/*/assets/chunk.*.js.license.txt (10 urls)",
+        "http://localhost:16878/callback  [POST from https://app.target.example/x]",
+        "http://127.0.0.1:8080/debug",
+        "https://patterns.internal.example/api/taggings/query",
+    ]
+    for descriptor in descriptors:
+        _create_surface(client, target_descriptor=descriptor)
+    _create_service(client, endpoint="get")
+    _record_decision(
+        client,
+        kind="coverage_deferral",
+        payload={"host": "post", "deferred_objectives": ["waf_tier"], "reason": "parse residue"},
+    )
+
+    body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
+
+    assert sorted(row["host"] for row in body["hosts"]) == [
+        "app.target.example",
+        "assets.target.example",
+        "patterns.internal.example",
+    ]
+    excluded = body["excluded_host_values"]
+    by_value = {entry["value"]: entry for entry in excluded}
+    assert set(by_value) == {
+        "GET /api2/entities/v1",
+        "/api2/recon/queries/domains/v1",
+        "http://localhost:16878/callback  [POST from https://app.target.example/x]",
+        "http://127.0.0.1:8080/debug",
+        "get",
+        "post",
+    }
+    assert by_value["get"]["source"] == "service"
+    assert by_value["post"]["source"] == "coverage_deferral"
+    assert by_value["/api2/recon/queries/domains/v1"]["source"] == "surface"
+    for entry in excluded:
+        assert entry["reason"], entry
+        assert isinstance(entry["id"], int)
+    assert body["engagement_signals"]["excluded_host_value_count"] == len(excluded)
+
+
+def test_per_host_coverage_keeps_single_label_and_loopback_hosts_scope_names(
+    client, isolate_settings
+):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
+    scope_path = engagement_dir / "scope.json"
+    import json
+
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope["hosts"] = ["example.com", "intranet", "localhost"]
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _create_service(client, endpoint="intranet:8080")
+    _create_surface(client, target_descriptor="http://localhost:3000/login")
+    _create_surface(client, target_descriptor="https://wiki/login")
+
+    body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
+
+    assert sorted(row["host"] for row in body["hosts"]) == ["intranet", "localhost"]
+    assert [entry["value"] for entry in body["excluded_host_values"]] == ["https://wiki/login"]

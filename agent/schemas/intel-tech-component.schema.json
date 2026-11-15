@@ -114,6 +114,20 @@
           },
           "required": ["verdict", "hosts"],
           "description": "Structured WAF measurement that closes the waf_tier readiness objective for each listed host. verdict none_detected records a measured negative. Requires command_run_id naming the run that measured the hosts; name a detected vendor in component."
+        },
+        "waf_measurements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "verdict": {"type": "string", "enum": ["detected", "none_detected"]},
+              "hosts": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "command_run_id": {"type": "integer", "minimum": 1}
+            },
+            "required": ["verdict", "hosts", "command_run_id"]
+          },
+          "description": "Earlier WAF measurements a row keeps when a later write for the same component and version measured other hosts. The backend fills this on dedup; each entry names its hosts and the run that measured them, and is checked like waf when sent back."
         }
       }
     }

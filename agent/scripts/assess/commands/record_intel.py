@@ -276,9 +276,43 @@ def run(args) -> None:
             }
         )
 
-    if intel_type == "note" and response.get("write_outcome") in {"created", "updated"}:
-        outcome = str(response["write_outcome"])
+    outcome = response.get("write_outcome")
+    if intel_type == "note" and outcome in {"created", "updated"}:
         qualifier = "new" if outcome == "created" else "existing"
         print(f"Recorded intel note id={record_id}: {outcome} {qualifier} note")
+    elif outcome == "updated":
+        natural_key = "+".join(field for field, _ in _NATURAL_IDENTITY_FIELDS[intel_type])
+        print(
+            f"Recorded intel {intel_type} id={record_id}: deduplicated into existing "
+            f"id={record_id} (same {natural_key}); this write's fields replaced the stored values"
+        )
+    elif outcome == "created":
+        print(f"Recorded intel {intel_type} id={record_id}: created new row")
     else:
         print(f"Recorded intel {intel_type} id={record_id}")
+    waf_merge = response.get("waf_merge")
+    if outcome == "updated" and isinstance(waf_merge, dict):
+        print(_waf_merge_line(intel_type, record_id, waf_merge))
+
+
+# Hosts the merge line names before it points at `intel get` for the rest.
+_WAF_MERGE_HOSTS_SHOWN = 10
+
+
+def _waf_merge_line(intel_type: str, record_id: int, merge: dict) -> str:
+    """Say which measured hosts a deduplicated WAF write merged, and how to see each run."""
+
+    def _hosts(key: str) -> str:
+        hosts = [str(host) for host in merge.get(key) or []]
+        shown = ", ".join(hosts[:_WAF_MERGE_HOSTS_SHOWN]) or "none"
+        hidden = len(hosts) - _WAF_MERGE_HOSTS_SHOWN
+        return f"{shown} (+{hidden} more)" if hidden > 0 else shown
+
+    measured = merge.get("measured_hosts") or []
+    return (
+        f"WAF measurements merged into id={record_id}: added {_hosts('added_hosts')}; "
+        f"re-measured {_hosts('remeasured_hosts')}; kept {_hosts('kept_hosts')}. "
+        f"The row measures {len(measured)} host(s), each with the run that measured it "
+        f"(provenance.waf plus provenance.waf_measurements): "
+        f"`vigil assess intel get {intel_type} {record_id}`"
+    )

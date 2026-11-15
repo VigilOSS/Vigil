@@ -104,3 +104,39 @@ def test_waf_hint_vendor_examples_are_vendors_the_backend_classifies():
     assert cc._HINT_WAF_VENDOR_EXAMPLES
     for vendor in cc._HINT_WAF_VENDOR_EXAMPLES:
         assert backend._row_is_waf_classification({"component": vendor}), vendor
+
+
+def test_by_host_section_reports_excluded_host_values_and_how_to_list_them():
+    excluded = [
+        {"source": "surface", "id": 3, "value": "GET /api/v1", "host": "", "reason": "names no host"},
+        {"source": "service", "id": 4, "value": "get", "host": "get", "reason": "not a hostname"},
+    ]
+    payload = {
+        "objectives": list(cc._PER_HOST_OBJECTIVES),
+        "hosts": [_row("api.example.com", {"met": True, "evidence": [], "deferred": False})],
+        "excluded_host_values": excluded,
+    }
+    section = cc.filter_to_scope_literals(cc.annotate_by_host_payload(payload), {"api.example.com"})
+
+    assert section["excluded_host_values"] == excluded
+    lines = cc.render_per_host_section(section, [])
+    line = next(line for line in lines if "excluded" in line)
+    assert "2 " in line
+    assert "--json" in line
+    assert "excluded_host_values" in line
+
+
+def test_cli_endpoint_host_mirrors_the_backend_on_descriptor_shapes():
+    backend = _backend_coverage_readiness()
+    assert cc._HTTP_METHOD_TOKENS == backend.HTTP_METHOD_TOKENS
+    for descriptor, host in (
+        ("patch https://app.example.com/api/v1", "app.example.com"),
+        ("post/patch/delete https://app.example.com/x", "app.example.com"),
+        ("GET /api/v1", ""),
+        ("/api/v1/items", ""),
+        ("assets.example.com/*/chunk.*.js (10 urls)", "assets.example.com"),
+        ("https://www.example.com:8443/login", "www.example.com"),
+        ("api.example.com:443", "api.example.com"),
+    ):
+        assert cc._endpoint_host(descriptor) == host, descriptor
+        assert backend._coverage_endpoint_host(descriptor) == host, descriptor

@@ -1413,6 +1413,9 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "--scripts default,vuln triggers heavy NSE: scope it to the open ports from a first pass so it fits one blocking call (--timeout 600 or less); a sweep that cannot fit is an operator-owned `kali job` a specialist names in next_steps.",
     ),
     "nuclei": (
+        "Templates live under the runtime's persistent /data/nuclei-templates; a fresh runtime "
+        "starts downloading them in the background, and `kali nuclei --update-templates` (no "
+        "target; nuclei exits after updating) downloads or refreshes them.",
         "Pass either -u or -l. LEAD with explicit `-t` template paths — `-as` (automatic) keys off "
         "tech fingerprinting, which a CDN/WAF defeats, so `-as` under-fires alone; treat it as additive.",
         "WAF-resilience: the wrapper injects `-mhe 50` by default so a host's 403 storm does not make "
@@ -1501,7 +1504,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Common record/filter flags are typed (-aaaa, -mx, -txt, -ns, -soa, -ptr, -asn, -cdn, -rcode, -wd). Use --extra-args only for unmodeled dnsx flags that are not guarded load/transport knobs.",
     ),
     "browser": (
-        "Playwright/system-Chromium workflow inside the runtime. Returns origin status, final DOM, screenshot, bounded console/network metadata, route candidates, and typed-step results as one JSON object.",
+        "Playwright/system-Chromium workflow inside the runtime. Returns origin status, final DOM, screenshot, bounded console/network metadata, route candidates, and typed-step results as one JSON object. The printed result names the driver program by sha256 in `resolved_argv`, and `stdout_preview` keeps the first entries of each list followed by a `[vigil] browser preview omitted:` line counting what it left out (and what the driver's own caps dropped) and naming the run's full stdout file, the HAR and the DOM that hold the rest.",
         "Required attribution follows the SCOPE boundary: mandated headers go to scope.json-admitted hosts only (the shared host_admitted matcher, so in-scope siblings like api.<target> get them and third parties never do), and the origins left unattributed are recorded. --attribution-scope all is the explicit escape hatch — it attributes every origin and warns on stderr. Scope never aborts or filters a request. The one refusal: a program that mandates a header with no resolvable in-scope host stops before navigation. Because scope is a predicate and never gates execution, a run whose OWN target host is absent from scope.json `hosts` (a recon-discovered sibling lives in `discovered_hosts`) navigates it UNATTRIBUTED — that case WARNs on stderr naming the host; declare it or pass --attribution-scope all before treating the traffic as deconflicted.",
         "Use --steps-file for at most 50 typed navigate/click/fill/wait/eval/assert actions. An assert with visible:false waits for the selector to become hidden; text is read only for contains/equals assertions. Declared URLs are syntax-validated before launch; dynamic browser navigations are never admitted or aborted by scope data.",
         "Waiting is composable, not either/or: --wait-until {domcontentloaded|load|networkidle} chooses the initial navigation's completion event, --wait-selector plus --wait-state {attached|visible|hidden|detached} waits for one element (attached is the default and only proves the node exists in the DOM, not that it rendered), and --settle then runs ON TOP of both (--settle 0 skips it). A `wait` step takes the same optional `state` key.",
@@ -2024,7 +2027,11 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
             "for a host. Record a measured negative as `none_detected`, and name a WAF in "
             "`component` only when the run saw one. A row that says 'no WAF' only in its "
             "text closes nothing; the backend refuses a measurement whose run is not in this "
-            "engagement, did not succeed, or did not target a named host, and names the host."
+            "engagement, did not succeed, or did not target a named host, and names the host. "
+            "A row is keyed on component+version, so recording the same component once per "
+            "measured host merges into one row: the reply says it deduplicated into id=N and "
+            "which hosts it added, re-measured, or kept, and every earlier host keeps its own "
+            "run in `provenance.waf_measurements` (a host measured again keeps only its newest run)."
         )
         examples.append({
             "component": "WAF: none detected",

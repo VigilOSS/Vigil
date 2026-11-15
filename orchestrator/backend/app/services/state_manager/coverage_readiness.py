@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import ipaddress
 import json
 from typing import Any
 from urllib.parse import urlparse
@@ -10,6 +11,7 @@ from fastapi import HTTPException
 from ..events import _engagement_or_404
 
 from . import _common
+from .app_units import _is_valid_hostname
 from ._common import (
     SEVERITY_RANK,
     WORKFLOW_STATUS_RANK,
@@ -296,22 +298,45 @@ _NON_LIVE_SERVICE_STATES_FOR_INVENTORY: frozenset[str] = frozenset(
     {"down", "filtered", "unreachable"}
 )
 
+#: Request methods a ``METHOD URL`` descriptor leads with (``post/patch/delete``
+#: joins several). Mirror of ``coverage_checks._HTTP_METHOD_TOKENS``.
+HTTP_METHOD_TOKENS: frozenset[str] = frozenset(
+    {"get", "post", "put", "patch", "delete", "head", "options", "trace", "connect"}
+)
+
+
+def _is_http_method_token(token: str) -> bool:
+    return all(part in HTTP_METHOD_TOKENS for part in token.split("/"))
+
+
 def _coverage_endpoint_host(endpoint: str) -> str:
     """Lowercased host portion of a service endpoint or surface descriptor.
 
     Mirrors `_endpoint_host` in `lib/coverage_checks.py` but the CLI version
     cannot be imported here. Keep the two in sync — they extract the same
-    host string from the same shapes (bare host, host:port, full URL).
+    host string from the same shapes (bare host, host:port, host/path, full
+    URL, each optionally led by a request method). A bare path, or a method
+    with no URL after it, names no host and yields "".
     """
     raw = (endpoint or "").strip().lower()
     if not raw:
         return ""
-    first = raw.split()[0]
+    tokens = raw.split()
+    first = tokens[0]
+    if _is_http_method_token(first):
+        if len(tokens) < 2:
+            return ""
+        first = tokens[1]
     if "://" in first:
         parsed = urlparse(first)
         return (parsed.hostname or "").strip("[]")
     # Strip leading/trailing wrappers and trailing punctuation.
     stripped = first.strip("'\"<>()").rstrip(",;").rstrip(".")
+    if stripped.startswith("/"):
+        return ""
+    if not stripped.startswith("[") and "/" in stripped:
+        # Schemeless host[:port]/path: the authority before the first slash.
+        stripped = stripped.split("/", 1)[0]
     if stripped.startswith("[") and "]" in stripped:
         # Bracketed IPv6 with optional :port suffix.
         host = stripped[1 : stripped.find("]")]
@@ -324,8 +349,6 @@ def _coverage_endpoint_host(endpoint: str) -> str:
         host, _, port = stripped.rpartition(":")
         if port.isdigit():
             try:
-                import ipaddress
-
                 ipaddress.ip_address(host)
                 return host
             except ValueError:
@@ -335,6 +358,38 @@ def _coverage_endpoint_host(endpoint: str) -> str:
     if port.isdigit() and host:
         return host
     return stripped
+
+def _readiness_host_problem(host: str, scope_allow: list[str]) -> str | None:
+    """Why a value extracted from a service, surface or deferral is not a host
+    the per-host readiness set can key on; None when it is one.
+
+    A host parses as an IP literal or a multi-label DNS hostname
+    (:func:`app_units._is_valid_hostname`) and is not a loopback name. A value a
+    scope.json host pattern covers is a host whatever its shape, so a scoped
+    single-label lab host or ``localhost`` target stays.
+    """
+    if not host:
+        return "names no host (a bare path, or a request method with no URL)"
+    from .coverage import _host_matches_scope_pattern
+
+    if any(_host_matches_scope_pattern(host, pattern) for pattern in scope_allow):
+        return None
+    if not _is_valid_hostname(host):
+        return "not a hostname or IP address (DNS label rules)"
+    if _is_loopback_host(host):
+        return "loopback host the scope does not list"
+    return None
+
+
+def _is_loopback_host(host: str) -> bool:
+    name = host.strip().strip(".").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
 
 def _string_contains_host(haystack: str, host: str) -> bool:
     """True when `host` appears as a token in `haystack` (case-insensitive).
@@ -388,11 +443,12 @@ def _intel_row_references_host(row: dict[str, Any], host: str) -> bool:
 def _row_is_waf_classification(row: dict[str, Any]) -> bool:
     """A vendor-named WAF row without a structured measurement.
 
-    A row carrying ``provenance.waf`` is judged by that structure alone, so a
+    A row carrying a WAF measurement (``provenance.waf`` or
+    ``provenance.waf_measurements``) is judged by that structure alone, so a
     measured negative whose component happens to name a CDN never reads as a
     detected WAF.
     """
-    if _row_provenance(row).get("waf") is not None:
+    if _provenance_has_waf_measurement(_row_provenance(row)):
         return False
     component = str(row.get("component", "") or "").lower()
     if not component:
@@ -408,6 +464,9 @@ def _row_is_waf_classification(row: dict[str, Any]) -> bool:
 #: ``waf_tier`` for the hosts it names without claiming a WAF is there.
 WAF_MEASUREMENT_VERDICTS: tuple[str, ...] = ("detected", "none_detected")
 _WAF_MEASUREMENT_KEYS = frozenset({"verdict", "hosts"})
+#: One entry of ``provenance.waf_measurements``: an earlier measurement merged
+#: into the row, carrying the run that measured its hosts.
+_WAF_CARRIED_MEASUREMENT_KEYS = frozenset({"verdict", "hosts", "command_run_id"})
 
 
 def _row_provenance(row: dict[str, Any]) -> dict[str, Any]:
@@ -420,43 +479,188 @@ def _row_provenance(row: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def waf_measurement_problem(provenance: Any) -> str | None:
-    """Why ``provenance.waf`` is not a structured WAF measurement.
+def _provenance_has_waf_measurement(provenance: Any) -> bool:
+    return isinstance(provenance, dict) and (
+        provenance.get("waf") is not None or provenance.get("waf_measurements") is not None
+    )
 
-    None when the provenance carries no ``waf`` block or carries a valid one:
-    ``{"verdict": "detected" | "none_detected", "hosts": [<host>, ...]}`` beside
-    the ``command_run_id`` of the run that measured it.
-    """
-    if not isinstance(provenance, dict) or provenance.get("waf") is None:
-        return None
-    waf = provenance["waf"]
-    if not isinstance(waf, dict):
-        return "provenance.waf must be an object {verdict, hosts}"
-    unknown = sorted(set(waf) - _WAF_MEASUREMENT_KEYS)
-    if unknown:
+
+def _waf_verdict_hosts_problem(block: dict[str, Any], label: str) -> str | None:
+    if block.get("verdict") not in WAF_MEASUREMENT_VERDICTS:
         return (
-            f"provenance.waf has unknown fields {unknown}; its fields are verdict, hosts "
-            "(name the vendor in component)"
+            f"{label}.verdict must be one of: {', '.join(WAF_MEASUREMENT_VERDICTS)} "
+            f"(got {block.get('verdict')!r})"
         )
-    if waf.get("verdict") not in WAF_MEASUREMENT_VERDICTS:
-        return (
-            f"provenance.waf.verdict must be one of: {', '.join(WAF_MEASUREMENT_VERDICTS)} "
-            f"(got {waf.get('verdict')!r})"
-        )
-    hosts = waf.get("hosts")
+    hosts = block.get("hosts")
     if (
         not isinstance(hosts, list)
         or not hosts
         or any(not isinstance(host, str) or not host.strip() for host in hosts)
     ):
-        return "provenance.waf.hosts must list each measured host (non-empty strings)"
-    run_id = provenance.get("command_run_id")
-    if type(run_id) is not int or run_id < 1:
-        return (
-            "provenance.waf needs provenance.command_run_id: the command run that "
-            "measured these hosts"
-        )
+        return f"{label}.hosts must list each measured host (non-empty strings)"
     return None
+
+
+def waf_measurement_problem(provenance: Any) -> str | None:
+    """Why the provenance's WAF measurements are not structured measurements.
+
+    None when the provenance carries none or carries valid ones. ``provenance.waf``
+    is ``{"verdict": "detected" | "none_detected", "hosts": [<host>, ...]}`` beside
+    the ``command_run_id`` of the run that measured it. ``provenance.waf_measurements``
+    lists earlier measurements merged into the row when a later write for the same
+    component and version measured other hosts; each entry names its own
+    ``verdict``, ``hosts`` and ``command_run_id``.
+    """
+    if not _provenance_has_waf_measurement(provenance):
+        return None
+    waf = provenance.get("waf")
+    if waf is not None:
+        if not isinstance(waf, dict):
+            return "provenance.waf must be an object {verdict, hosts}"
+        unknown = sorted(set(waf) - _WAF_MEASUREMENT_KEYS)
+        if unknown:
+            return (
+                f"provenance.waf has unknown fields {unknown}; its fields are verdict, hosts "
+                "(name the vendor in component)"
+            )
+        problem = _waf_verdict_hosts_problem(waf, "provenance.waf")
+        if problem is not None:
+            return problem
+        run_id = provenance.get("command_run_id")
+        if type(run_id) is not int or run_id < 1:
+            return (
+                "provenance.waf needs provenance.command_run_id: the command run that "
+                "measured these hosts"
+            )
+    carried = provenance.get("waf_measurements")
+    if carried is not None:
+        if not isinstance(carried, list):
+            return (
+                "provenance.waf_measurements must be a list of "
+                "{verdict, hosts, command_run_id} objects"
+            )
+        for index, entry in enumerate(carried):
+            label = f"provenance.waf_measurements[{index}]"
+            if not isinstance(entry, dict):
+                return f"{label} must be an object {{verdict, hosts, command_run_id}}"
+            unknown = sorted(set(entry) - _WAF_CARRIED_MEASUREMENT_KEYS)
+            if unknown:
+                return (
+                    f"{label} has unknown fields {unknown}; its fields are verdict, "
+                    "hosts, command_run_id"
+                )
+            problem = _waf_verdict_hosts_problem(entry, label)
+            if problem is not None:
+                return problem
+            run_id = entry.get("command_run_id")
+            if type(run_id) is not int or run_id < 1:
+                return f"{label}.command_run_id must name the command run that measured its hosts"
+    return None
+
+
+def _provenance_waf_measurements(provenance: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every measurement a well-formed provenance records, oldest first.
+
+    The carried ``waf_measurements`` entries precede the measurement this write
+    made (``waf`` with the top-level ``command_run_id``). Hosts keep the spelling
+    the run was checked against.
+    """
+    measurements = [
+        {
+            "verdict": entry["verdict"],
+            "hosts": list(entry["hosts"]),
+            "command_run_id": entry["command_run_id"],
+        }
+        for entry in provenance.get("waf_measurements") or []
+    ]
+    waf = provenance.get("waf")
+    if waf is not None:
+        measurements.append({
+            "verdict": waf["verdict"],
+            "hosts": list(waf["hosts"]),
+            "command_run_id": provenance["command_run_id"],
+        })
+    return measurements
+
+
+def _measured_hosts(measurements: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """``{host: {verdict, command_run_id}}``; a later measurement of a host wins."""
+    hosts: dict[str, dict[str, Any]] = {}
+    for measurement in measurements:
+        for host in measurement["hosts"]:
+            hosts[_waf_measurement_host(host)] = {
+                "verdict": measurement["verdict"],
+                "command_run_id": measurement["command_run_id"],
+            }
+    return hosts
+
+
+def merge_waf_measurements(
+    stored: Any, incoming: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The provenance a re-record of an existing tech-component row stores.
+
+    A tech-component row is keyed on component and version, so measuring each
+    host in its own write lands every write on one row. The incoming
+    provenance replaces the stored one, but no measured host is lost: every
+    stored measurement of a host the incoming write does not measure moves into
+    ``provenance.waf_measurements`` with its own run, and a host measured again
+    keeps only its newest measurement. Returns the provenance to store and a
+    summary of the merge (None when neither side records a measurement); a
+    malformed side is not merged, so it stays visible as malformed.
+    """
+    incoming = dict(incoming or {})
+    stored = stored if isinstance(stored, dict) else {}
+    if waf_measurement_problem(incoming) is not None or waf_measurement_problem(stored) is not None:
+        return incoming, None
+    earlier = _provenance_waf_measurements(stored)
+    newer = _provenance_waf_measurements(incoming)
+    if not earlier and not newer:
+        return incoming, None
+    sequence = earlier + newer
+    current = newer[-1] if incoming.get("waf") is not None else None
+    claimed_now = (
+        {_waf_measurement_host(host) for host in current["hosts"]} if current else set()
+    )
+    claimed = set(claimed_now)
+    carried: list[dict[str, Any]] = []
+    for measurement in reversed(sequence[:-1] if current else sequence):
+        hosts = [
+            host for host in measurement["hosts"] if _waf_measurement_host(host) not in claimed
+        ]
+        claimed.update(_waf_measurement_host(host) for host in hosts)
+        if not hosts:
+            continue
+        twin = next(
+            (
+                entry
+                for entry in carried
+                if entry["verdict"] == measurement["verdict"]
+                and entry["command_run_id"] == measurement["command_run_id"]
+            ),
+            None,
+        )
+        if twin is not None:
+            twin["hosts"] = hosts + twin["hosts"]
+        else:
+            carried.insert(0, {**measurement, "hosts": hosts})
+    merged = dict(incoming)
+    if carried:
+        merged["waf_measurements"] = carried
+    else:
+        merged.pop("waf_measurements", None)
+    before = _measured_hosts(earlier)
+    after = _measured_hosts(_provenance_waf_measurements(merged))
+    remeasured = sorted(host for host in before if host in claimed_now or after[host] != before[host])
+    summary = {
+        "added_hosts": sorted(set(after) - set(before)),
+        "remeasured_hosts": remeasured,
+        "kept_hosts": sorted(set(before) - set(remeasured)),
+        "measured_hosts": [
+            {"host": host, **after[host]} for host in sorted(after)
+        ],
+    }
+    return merged, summary
 
 
 def _waf_measurement_host(host: str) -> str:
@@ -494,7 +698,7 @@ def _waf_tool_argv_hosts(argv: list[str]) -> set[str]:
     return hosts
 
 
-def _waf_run_problem(run: Any, provenance: dict[str, Any]) -> str | None:
+def _waf_run_problem(run: Any, run_id: int, measured_hosts: list[str]) -> str | None:
     """Why the cited command run does not back a WAF measurement of the hosts named.
 
     The run must have succeeded (lifecycle status ``completed`` and marked
@@ -504,7 +708,6 @@ def _waf_run_problem(run: Any, provenance: dict[str, Any]) -> str | None:
     targets of a wafw00f argv (`_waf_tool_argv_hosts`). The command text is never
     read for a host.
     """
-    run_id = provenance["command_run_id"]
     if run is None:
         return (
             f"provenance.command_run_id {run_id} names no command run in this "
@@ -533,9 +736,7 @@ def _waf_run_problem(run: Any, provenance: dict[str, Any]) -> str | None:
         run_hosts = _waf_tool_argv_hosts(
             [str(arg) for arg in argv] if isinstance(argv, list) else []
         )
-    missing = [
-        host for host in provenance["waf"]["hosts"] if _waf_measurement_host(host) not in run_hosts
-    ]
+    missing = [host for host in measured_hosts if _waf_measurement_host(host) not in run_hosts]
     if missing:
         recorded = ", ".join(sorted(run_hosts)) if run_hosts else "no host"
         return (
@@ -557,15 +758,20 @@ def check_waf_measurement(engagement_id: int, provenance: Any) -> None:
     measurement cites is checked here, when it is written.
     """
     problem = waf_measurement_problem(provenance)
-    if problem is None and isinstance(provenance, dict) and provenance.get("waf") is not None:
+    if problem is None and _provenance_has_waf_measurement(provenance):
         engagement = _engagement_or_404(engagement_id)
         with _common.get_connection() as connection:
-            run = connection.execute(
-                "SELECT status, success, timed_out, argv_json, target_host "
-                "FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
-                (engagement.id, provenance["command_run_id"]),
-            ).fetchone()
-        problem = _waf_run_problem(run, provenance)
+            for measurement in _provenance_waf_measurements(provenance):
+                run = connection.execute(
+                    "SELECT status, success, timed_out, argv_json, target_host "
+                    "FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+                    (engagement.id, measurement["command_run_id"]),
+                ).fetchone()
+                problem = _waf_run_problem(
+                    run, measurement["command_run_id"], measurement["hosts"]
+                )
+                if problem is not None:
+                    break
     if problem is not None:
         raise HTTPException(
             status_code=422,
@@ -578,17 +784,16 @@ def check_waf_measurement(engagement_id: int, provenance: Any) -> None:
         )
 
 
-def _waf_measurement(row: dict[str, Any]) -> dict[str, Any] | None:
-    """The structured WAF measurement a tech-component row records, or None."""
+def _waf_measurements(row: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The structured WAF measurements a tech-component row records, or None
+    when they are malformed."""
     provenance = _row_provenance(row)
-    if provenance.get("waf") is None or waf_measurement_problem(provenance) is not None:
+    if waf_measurement_problem(provenance) is not None:
         return None
-    hosts = {_waf_measurement_host(host) for host in provenance["waf"]["hosts"]}
-    return {
-        "verdict": provenance["waf"]["verdict"],
-        "hosts": hosts,
-        "command_run_id": provenance["command_run_id"],
-    }
+    return [
+        {**measurement, "hosts": {_waf_measurement_host(host) for host in measurement["hosts"]}}
+        for measurement in _provenance_waf_measurements(provenance)
+    ]
 
 def _row_is_tech_scan_evidence(row: dict[str, Any]) -> bool:
     """True when a tech-component row plausibly came from a 'nikto-equivalent'
@@ -852,12 +1057,12 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
     with _common.get_connection() as connection:
         services = _fetch_all(
             connection,
-            "SELECT endpoint, state FROM assessment_services WHERE engagement_id = ?",
+            "SELECT id, endpoint, state FROM assessment_services WHERE engagement_id = ?",
             (eng_id,),
         )
         surfaces = _fetch_all(
             connection,
-            "SELECT surface_type, target_descriptor, status FROM assessment_surfaces "
+            "SELECT id, surface_type, target_descriptor, status FROM assessment_surfaces "
             "WHERE engagement_id = ?",
             (eng_id,),
         )
@@ -907,31 +1112,55 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
         if row.get("superseded_by_id") is not None:
             continue
         provenance = _row_provenance(row)
-        if provenance.get("waf") is None:
+        if not _provenance_has_waf_measurement(provenance):
             live_tech_components.append(row)
             continue
-        measurement = _waf_measurement(row)
-        if measurement is None:
+        measurements = _waf_measurements(row)
+        if measurements is None:
             ignored_waf_measurements.append({
                 "intel_id": int(row.get("id") or 0),
                 "problem": waf_measurement_problem(provenance),
             })
         else:
-            waf_measurements.append((row, measurement))
+            waf_measurements.extend((row, measurement) for measurement in measurements)
 
-    # Discover every host the engagement actually has signal for.
+    # Discover every host the engagement actually has signal for. A value that
+    # is not a host (a bare path, an HTTP method, a glob, a single label, a
+    # loopback name the scope does not list) keys no row; it is listed in
+    # ``excluded_host_values`` instead of being dropped unseen.
+    from .coverage import _engagement_scope_admission  # coverage imports this module
+
+    scope_admission = _engagement_scope_admission(engagement)
+    scope_allow = scope_admission[0] if scope_admission is not None else []
+    excluded_host_values: list[dict[str, Any]] = []
+
+    def _admit(value: str, host: str, source: str, row_id: Any) -> bool:
+        reason = _readiness_host_problem(host, scope_allow)
+        if reason is None:
+            return True
+        excluded_host_values.append({
+            "source": source,
+            "id": int(row_id or 0),
+            "value": value,
+            "host": host,
+            "reason": reason,
+        })
+        return False
+
     hosts: set[str] = set()
     services_by_host: dict[str, list[dict[str, Any]]] = {}
     surfaces_by_host: dict[str, list[dict[str, Any]]] = {}
     for row in services:
-        host = _coverage_endpoint_host(str(row.get("endpoint") or ""))
-        if not host:
+        endpoint = str(row.get("endpoint") or "")
+        host = _coverage_endpoint_host(endpoint)
+        if not _admit(endpoint, host, "service", row.get("id")):
             continue
         hosts.add(host)
         services_by_host.setdefault(host, []).append(row)
     for row in surfaces:
-        host = _coverage_endpoint_host(str(row.get("target_descriptor") or ""))
-        if not host:
+        descriptor = str(row.get("target_descriptor") or "")
+        host = _coverage_endpoint_host(descriptor)
+        if not _admit(descriptor, host, "surface", row.get("id")):
             continue
         hosts.add(host)
         surfaces_by_host.setdefault(host, []).append(row)
@@ -948,7 +1177,8 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
         if not row_hosts:
             continue
         for host in row_hosts:
-            deferrals_by_host.setdefault(host, []).append(row)
+            if _admit(host, host, "coverage_deferral", row.get("id")):
+                deferrals_by_host.setdefault(host, []).append(row)
     for host in deferrals_by_host.keys():
         hosts.add(host)
 
@@ -1129,5 +1359,7 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
             "waf_measurements_ignored": ignored_waf_measurements,
             "tech_scan_intel_count": len(tech_fingerprint_rows),
             "osint_intel_total": len(live_tech_components) + int(people_count) + int(breach_count),
+            "excluded_host_value_count": len(excluded_host_values),
         },
+        "excluded_host_values": excluded_host_values,
     }
