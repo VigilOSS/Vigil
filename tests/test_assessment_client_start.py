@@ -229,6 +229,8 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     # The operator's personal ~/.claude prompt and skills stay out of the engagement.
     assert environment["OPENCODE_DISABLE_CLAUDE_CODE"] == "1"
     assert environment["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+    # A blocking kali run may take its full 600 s budget; the shell must outlast it.
+    assert int(environment["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"]) > 600_000
     assert environment["OPENCODE_CONFIG_DIR"] == str(workspace / ".opencode")
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
     binding = json.loads((workspace / ".vigil-client-context.json").read_text())

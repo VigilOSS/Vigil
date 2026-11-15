@@ -470,6 +470,9 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         # OpenCode reads autoupdate only from its global config; an update modal over
         # the TUI would capture the next keystroke.
         "OPENCODE_DISABLE_AUTOUPDATE": "1",
+        # OpenCode's shell defaults to 120 s; a blocking kali run may use its
+        # whole 600 s budget, so give each command a minute beyond it.
+        "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS": "660000",
         "VIGIL_AGENT_ROOT": binding["agent_root"], "ENGAGEMENT_DIR": binding["engagement_dir"],
         "VIGIL_SESSION_ENGAGEMENT_DIR": binding["engagement_dir"], "VIGIL_OPERATOR_MODE": mode,
         "VIGIL_INSTALL_DIR": binding["install_root"], "VIGIL_CLIENT_NAME": client,
