@@ -425,14 +425,14 @@ def test_browser_run_emits_no_attribution_warning(monkeypatch, tmp_path, capsys)
     assert "could not be" not in capsys.readouterr().err
 
 
-def test_a_genuinely_uninjectable_tool_still_warns(monkeypatch, tmp_path, capsys) -> None:
+def test_a_genuinely_uninjectable_tool_is_refused(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(kali, "_required_headers", lambda _dir: {"X-HackerOne": "h"})
-    kali.prepare_execution_command(
-        ["wafw00f", "https://app.example.com"],
-        tool_name="wafw00f",
-        engagement_dir=tmp_path,
-    )
-    assert "could not be" in capsys.readouterr().err
+    with pytest.raises(kali.scope_lib.ScopePolicyError, match="X-HackerOne"):
+        kali.prepare_execution_command(
+            ["httprobe", "-prefer-https"],
+            tool_name="httprobe",
+            engagement_dir=tmp_path,
+        )
 
 
 # --------------------------------------------------------------------------- #

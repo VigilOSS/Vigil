@@ -186,6 +186,18 @@ def register(subparsers) -> None:
         default="",
         help="Logical liveness scope used to resolve a scoped identity alias.",
     )
+    p.add_argument(
+        "--no-target-requests",
+        dest="no_target_requests",
+        default="",
+        metavar="REASON",
+        help=(
+            "State that this run sends no request to a declared target, for a "
+            "required-headers program where Vigil cannot attach or verify the "
+            "headers itself. Recorded on the audit row; refused when the argv "
+            "names a target."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -944,6 +956,7 @@ def run(args) -> None:
             container_paths=False,
             identity=getattr(args, "identity", None),
             identity_scope=getattr(args, "identity_scope", "") or "",
+            no_target_requests=str(getattr(args, "no_target_requests", "") or ""),
             report=prepare_report,
         )
         inferred_target_host = _extract_target_anchor(args.tool.strip(), argv)[0]

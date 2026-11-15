@@ -329,12 +329,59 @@ def register(subparsers) -> None:
             "nuclei's public interactsh), or vigil (route to VIGIL_OOB_DOMAIN)."
         ),
     )
+    p.add_argument(
+        "--update-templates",
+        "-ut",
+        "-update-templates",
+        dest="update_templates",
+        action="store_true",
+        help=(
+            "Download or refresh the nuclei templates (into the runtime's persistent "
+            "/data/nuclei-templates) and exit; takes no target. nuclei exits after an "
+            "update, so run the scan as its own command."
+        ),
+    )
     p.set_defaults(func=run)
 
 
+_UPDATE_TEMPLATE_FLAGS = frozenset({"-ut", "-update-templates", "--update-templates"})
+
+
+def _wants_template_update(args) -> bool:
+    if getattr(args, "update_templates", False):
+        return True
+    try:
+        extra = shlex.split(getattr(args, "extra_args", "") or "")
+    except ValueError:
+        return False
+    return any(token in _UPDATE_TEMPLATE_FLAGS for token in extra)
+
+
+def _run_template_update(args) -> None:
+    if args.target_url or args.target_list:
+        raise AssessError(
+            "nuclei exits after --update-templates without scanning, so the targets "
+            "would never be scanned: run `kali nuclei --update-templates` on its own, "
+            "then the scan"
+        )
+    result = kali_exec(
+        ["nuclei", "-update-templates"],
+        tool_name="nuclei",
+        **kali_args_to_kwargs(args),
+    )
+    emit_result(result)
+
+
 def run(args) -> None:
+    if _wants_template_update(args):
+        _run_template_update(args)
+        return
     if not args.target_url and not args.target_list:
-        print("nuclei: pass -u <url> or -l <list>", file=sys.stderr)
+        print(
+            "nuclei: pass -u <url> or -l <list> (or --update-templates alone to "
+            "download the templates)",
+            file=sys.stderr,
+        )
         raise AssessError("missing -u or -l")
     _reject_passthrough_oob_flags(args)
     cmd: list[str] = ["nuclei"]

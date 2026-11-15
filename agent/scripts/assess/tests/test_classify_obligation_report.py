@@ -187,3 +187,47 @@ def test_an_agent_id_no_dispatch_holds_is_refused_before_sending(monkeypatch, tm
     with pytest.raises(AssessError, match="acme-nobody"):
         _classify(monkeypatch, tmp_path, client, [_medium(1)], agent_id="acme-nobody")
     assert client.posts == []
+
+
+def test_the_printed_full_list_command_reaches_the_activity_route(monkeypatch, tmp_path, capsys):
+    import shlex
+
+    from assess.commands import fetch
+
+    changes = [_change(file_id) for file_id in range(1, 31)]
+    _classify(monkeypatch, tmp_path, _Client({"obligation_changes": changes}),
+              [_medium(file_id) for file_id in range(1, 31)])
+    out = capsys.readouterr().out
+    pointer = next(line for line in out.splitlines() if "full list: " in line)
+    argv = shlex.split(pointer.split("full list: ", 1)[1].split(" (", 1)[0])
+    assert argv[:3] == ["vigil", "assess", "fetch"]
+
+    reads: list[tuple[str, str, str]] = []
+
+    class _Backend:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get_engagement(self, endpoint, query=""):
+            reads.append(("engagement", endpoint, query))
+            return {"total": 1, "items": [{"id": 1, "metadata": {"obligation_changes": changes}}]}
+
+        def get(self, endpoint, *args, **kwargs):
+            reads.append(("assessment", endpoint, ""))
+            raise AssertionError(f"routed under /assessment/: {endpoint}")
+
+    monkeypatch.setattr(fetch, "AssessmentClient", _Backend)
+    monkeypatch.setattr(fetch, "load_config", lambda _dir: SimpleNamespace(
+        base_url="http://127.0.0.1:18000", engagement_key="2026-11-15-acme"))
+    fetch.run(SimpleNamespace(endpoint=argv[3], engagement_dir=None, list_routes=False,
+                              paginate=False, jq=None, compact=True))
+
+    [(scope, endpoint, query)] = reads
+    assert (scope, endpoint) == ("engagement", "activity-entries")
+    assert "q=code-record+classify" in query or "q=code-record%20classify" in query

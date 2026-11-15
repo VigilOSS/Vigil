@@ -413,3 +413,70 @@ def test_requeue_resolution_note_names_how_the_review_addressed_the_trigger(
     carried_reason = carried["resolution_note"].split(":", 1)[1]
     covered_reason = covered["resolution_note"].split(":", 1)[1]
     assert carried_reason != covered_reason, (carried_reason, covered_reason)
+
+
+def test_requeue_inserts_nothing_for_a_target_whose_every_trigger_it_resolved(
+    client, isolate_settings
+):
+    """A trigger row copied from list-triggers carries its reason; once the
+    covering review resolves the trigger, that reason is no work of its own."""
+    key = "2026-11-15-acme-trigger-echo"
+    base, repo, helper = _seed_parser_trigger(client, isolate_settings, key)
+    covering = _claim_file_for_analysis(client, key, int(helper["id"]), priority=79)
+    _review(client, key, covering)
+    [pending] = client.get(f"{base}/triggers").json()["items"]
+
+    requeue = client.post(f"{base}/analysis-queue/requeue", json={"items": [{
+        "trigger_id": pending["id"], "reason": pending["reason"],
+        "trigger_context": {"vuln_class": pending["vuln_class"]},
+    }]})
+
+    assert requeue.status_code == 201, requeue.text
+    outcome = requeue.json()
+    assert outcome["inserted"] == 0 and outcome["already_completed"] == 1, outcome
+    assert outcome["reopened_terminal_files"] == 0
+    [target] = outcome["outcomes"]
+    assert target["resolved_trigger_ids"] == [pending["id"]]
+    assert str(pending["id"]) in target["detail"]
+    queue = client.get(f"{base}/analysis-queue").json()["items"]
+    assert [row["id"] for row in queue if row["file_id"] == helper["id"]] == [covering["id"]]
+
+
+def test_requeue_still_inserts_new_free_text_context_beside_a_resolved_trigger(
+    client, isolate_settings
+):
+    """Context the caller names by file, not by the resolved trigger, is new work."""
+    key = "2026-11-15-acme-trigger-new-context"
+    base, repo, helper = _seed_parser_trigger(client, isolate_settings, key)
+    covering = _claim_file_for_analysis(client, key, int(helper["id"]), priority=79)
+    _review(client, key, covering)
+    [pending] = client.get(f"{base}/triggers").json()["items"]
+
+    requeue = client.post(f"{base}/analysis-queue/requeue", json={"items": [
+        {"trigger_id": pending["id"]},
+        {"file_path": "src/helpers.py", "priority": 79, "reason": "Acme token reaches eval",
+         "trigger_context": {"vuln_class": "code-injection"}},
+    ]})
+
+    assert requeue.status_code == 201, requeue.text
+    outcome = requeue.json()
+    assert outcome["inserted"] == 1, outcome
+    assert outcome["resolved_trigger_ids"] == [pending["id"]]
+
+
+def test_list_triggers_takes_all_and_names_every_status_it_refuses(client, isolate_settings):
+    from app.services.code_analysis_support import _TRIGGER_STATUSES
+
+    key = "2026-11-15-acme-trigger-status-filter"
+    base, _repo, _helper = _seed_parser_trigger(client, isolate_settings, key)
+
+    every = client.get(f"{base}/triggers", params={"status": "all"})
+    assert every.status_code == 200, every.text
+    assert every.json()["items"] == client.get(f"{base}/triggers").json()["items"]
+
+    refused = client.get(f"{base}/triggers", params={"status": "accepted_gap"})
+    assert refused.status_code == 400
+    detail = refused.json()["detail"]
+    assert "accepted_gap" in detail and "all" in detail
+    for name in _TRIGGER_STATUSES:
+        assert name in detail

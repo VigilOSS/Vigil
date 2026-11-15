@@ -46,7 +46,7 @@ from ._common import (
     _slugify,
     _stronger_severity,
 )
-from .cvss import CvssVectorError, base_score
+from .cvss import CvssVectorError, base_score, versioned_vector
 from .finding_details import (
     validate_finding_details,
 )
@@ -2294,6 +2294,18 @@ def create_finding(
                     _json_object(existing["details_json"]) if existing is not None else {}
                 ),
             )
+        bare_vector = (details or {}).get("cvss_vector")
+        prefixed_vector = (
+            versioned_vector(bare_vector) if isinstance(bare_vector, str) else None
+        )
+        if prefixed_vector is not None:
+            details = {**(details or {}), "cvss_vector": prefixed_vector}
+            derived.append(derived_field(
+                "details.cvss_vector", prefixed_vector, "details.cvss_vector",
+                f"details.cvss_vector '{bare_vector}' had no version prefix; its base "
+                f"metrics name {prefixed_vector.split('/', 1)[0]}, so stored "
+                f"'{prefixed_vector}'",
+            ))
         # Every finding write — record, `finding update` (patch_finding), and the
         # verify checkpoint — funnels through here, so this is the one layer that
         # can hold cvss_score and cvss_vector to each other at write time. What

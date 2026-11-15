@@ -189,3 +189,6 @@ def run(args) -> None:
     print(f"Modules created: {len(result)}")
     for mod in result:
         print(f"  [{mod['id']}] {mod['module_key']}: {mod.get('name', '?')}")
+        for entry in mod.get("derived") or []:
+            if isinstance(entry, dict):
+                print(f"    derived: {entry.get('detail', '')}")

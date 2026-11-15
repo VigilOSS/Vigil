@@ -1509,7 +1509,15 @@ def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[i
     ).fetchall()
     found = {int(row["id"]): dict(row) for row in rows}
     if len(found) != len(file_ids):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+        missing = sorted(file_ids - set(found))
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "Code file not found: file_id "
+                + ", ".join(str(file_id) for file_id in missing)
+                + " names no admitted file of a published repo in this engagement"
+            ),
+        )
     return found
 
 

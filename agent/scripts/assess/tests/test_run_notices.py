@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import recon
-from assess.lib import execution_recency, kali, run_notices
+from assess.lib import execution_recency, run_notices
 
 
 class _RecencyClient:
@@ -60,29 +60,6 @@ def test_without_a_run_scope_every_call_still_prints(capsys):
     err = capsys.readouterr().err
     assert err.count("target concurrency advisory:") == 2
     assert "not repeated" not in err
-
-
-def test_header_warning_prints_once_per_tool_per_run(tmp_path, capsys):
-    headers = {"X-Acme-Research": "acme-team"}
-
-    def warn(tool: str) -> None:
-        kali._verify_required_headers_in_script(
-            ["bash", "-lc", f"{tool} --version"],
-            engagement_dir=tmp_path,
-            headers=headers,
-            tool_name=tool,
-        )
-
-    with run_notices.notice_scope():
-        warn("wafw00f")
-        warn("wafw00f")
-        warn("acme-scanner")
-    err = capsys.readouterr().err
-
-    assert err.count("could not be injected into tool 'wafw00f'") == 1
-    assert err.count("could not be injected into tool 'acme-scanner'") == 1
-    assert "Not repeated for this tool for the rest of this run" in err
-    assert "required_header_status" in err
 
 
 def test_child_processes_inherit_what_the_run_already_printed():

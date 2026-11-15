@@ -72,6 +72,58 @@ _SUBFINDER_PROVIDER_KEY_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
 _SUBFINDER_CONFIG_REL_PATH = ".config/subfinder/provider-config.yaml"
 
 
+# nuclei reads its templates from here (NUCLEI_TEMPLATES_DIR), under the
+# persistent /data mount, so a recreated container keeps the templates the last
+# one downloaded instead of starting with none.
+NUCLEI_TEMPLATES_DIR = "/data/nuclei-templates"
+_NUCLEI_TEMPLATES_PRESENT_SCRIPT = (
+    f'if [ -n "$(find {NUCLEI_TEMPLATES_DIR} -name \'*.yaml\' -print -quit 2>/dev/null)" ]; '
+    "then echo present; else echo missing; fi"
+)
+_NUCLEI_TEMPLATES_REFRESH_HINT = (
+    "`vigil assess kali nuclei --update-templates --technique RECON --intent 'refresh "
+    "templates' --probe-kind fingerprint --phase recon --timeout 300` downloads them"
+)
+
+
+def provision_nuclei_templates(
+    container_name: str, *, runner: docker.Runner = docker.run_command
+) -> str:
+    """Start a background template download when the runtime has none.
+
+    Returns ``"present"``, ``"downloading"`` or ``"unknown"``. Fail-open: a
+    check or start that fails prints one line naming the command that downloads
+    the templates, and the runtime starts regardless.
+    """
+    env_arg = f"NUCLEI_TEMPLATES_DIR={NUCLEI_TEMPLATES_DIR}"
+    check = runner(
+        ["docker", "exec", "-e", env_arg, container_name, "sh", "-c", _NUCLEI_TEMPLATES_PRESENT_SCRIPT]
+    )
+    state = (check.stdout or "").strip().splitlines()[-1:] if check.returncode == 0 else []
+    if state == ["present"]:
+        return "present"
+    if state == ["missing"]:
+        started = runner([
+            "docker", "exec", "-d", "-e", env_arg, container_name,
+            "nuclei", "-update-templates", "-silent",
+        ])
+        if started.returncode == 0:
+            print(
+                f"runtime\tnuclei templates: none under {NUCLEI_TEMPLATES_DIR}; downloading "
+                "them in the background (needs egress; kept across recreates). Scans started "
+                f"before it finishes see a partial set; {_NUCLEI_TEMPLATES_REFRESH_HINT} again.",
+                file=sys.stderr,
+            )
+            return "downloading"
+    detail = (check.stderr or check.stdout or "").strip() or "docker exec failed"
+    print(
+        f"[vigil] WARN: could not check nuclei templates under {NUCLEI_TEMPLATES_DIR} "
+        f"({detail}); {_NUCLEI_TEMPLATES_REFRESH_HINT}.",
+        file=sys.stderr,
+    )
+    return "unknown"
+
+
 def _resolve_runtime_data_dir(install_root: Path) -> Path:
     """Resolve the runtime container's host-side ``/data`` mount dir.
 
@@ -740,7 +792,11 @@ def _start_runtime_locked(
     # so the orchestrator/backend loop is always reachable even when a custom
     # egress network is attached.
     argv.extend(_egress_run_args(egress))
-    argv.extend(["-e", f"ORCHESTRATOR_BASE_URL={base_url}", options.image])
+    argv.extend([
+        "-e", f"NUCLEI_TEMPLATES_DIR={NUCLEI_TEMPLATES_DIR}",
+        "-e", f"ORCHESTRATOR_BASE_URL={base_url}",
+        options.image,
+    ])
     _surface_egress_choice(egress)
     docker.run_with_host_gateway_fallback(argv, runner=runner)
     # Keep a container that fails validation available for logs and mount inspection.
@@ -752,6 +808,7 @@ def _start_runtime_locked(
     # Translate the SUBFINDER_* keys (delivered via --env-file above) into
     # subfinder's on-disk provider-config.yaml inside the container. Fail-open.
     generate_subfinder_provider_config(options.container_name, runner=runner)
+    provision_nuclei_templates(options.container_name, runner=runner)
     if local_hosts:
         print(
             f"runtime\twired {len(local_hosts)} local replica host(s) to the host gateway",

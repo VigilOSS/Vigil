@@ -230,6 +230,20 @@ def add_required_kali_flags(parser) -> None:
             "`bash -c '<curl …>'` instead."
         ),
     )
+    parser.add_argument(
+        "--no-target-requests",
+        dest="no_target_requests",
+        default="",
+        metavar="REASON",
+        help=(
+            "On a program with required attribution headers, state that this run "
+            "sends no request to a declared target (it parses stored output, talks "
+            "only to a local mock, ...). Needed only when Vigil cannot attach the "
+            "headers itself and cannot read the program to tell; the reason is "
+            "recorded on the audit row, and a run whose argv names a target is "
+            "still refused."
+        ),
+    )
     # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen
     # import-time constant) and reuse it for both the default and the help text,
     # so a single parse can never report a default that disagrees with itself.
@@ -331,6 +345,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "identity_scope": getattr(args, "identity_scope", "") or "",
         "identity_target": getattr(args, "identity_target", "") or "",
         "identity_env": getattr(args, "identity_env", None) or None,
+        "no_target_requests": str(getattr(args, "no_target_requests", "") or ""),
     }
     if explicit_dir is not None:
         if not str(explicit_dir).strip():

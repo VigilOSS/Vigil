@@ -10623,6 +10623,65 @@ def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, 
     }
 
 
+def test_module_creation_names_every_unknown_entry_of_every_module_at_once(
+    client, isolate_settings
+):
+    engagement_key = "2026-11-15-code-modules-unknown"
+    repo, _files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="acme-mods")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/modules",
+        json={
+            "repo_id": repo["id"],
+            "modules": [
+                {"module_key": "acme-parser", "name": "Parser",
+                 "files": ["src/parser.py", "src/missing.py", "config/"]},
+                {"module_key": "acme-static", "name": "Static",
+                 "files": ["ftp/"], "file_ids": [999999]},
+            ],
+        },
+    )
+
+    assert response.status_code == 404, response.text
+    detail = response.json()["detail"]
+    for named in ("acme-parser", "src/missing.py", "config/", "acme-static", "ftp/", "999999"):
+        assert named in detail, detail
+    assert client.get(f"/engagements/{engagement_key}/assessment/code/modules").json() == []
+
+
+def test_module_creation_takes_a_trailing_slash_entry_as_its_files_and_says_so(
+    client, isolate_settings
+):
+    engagement_key = "2026-11-15-code-modules-prefix"
+    repo, _files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="acme-prefix")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/modules",
+        json={
+            "repo_id": repo["id"],
+            "modules": [{"module_key": "acme-src", "name": "Source", "files": ["src/"]}],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    module = response.json()[0]
+    assert module["file_count"] == 2
+    [derivation] = module["derived"]
+    assert derivation["field"] == "files"
+    assert derivation["derived_from"] == "src/"
+    assert derivation["value"] == ["src/helpers.py", "src/parser.py"]
+
+
+def test_queue_items_naming_unknown_file_ids_say_which(client, isolate_settings):
+    engagement_key = "2026-11-15-code-queue-unknown-file"
+    _seed_repo_files(client, isolate_settings, engagement_key, repo_key="acme-queue")
+
+    response = _queue_file(client, engagement_key, 999999, 50)
+
+    assert response.status_code == 404, response.text
+    assert "999999" in response.json()["detail"]
+
+
 def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
     engagement_key = "2026-04-09-code-module-status"
     repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="module-status-repo")

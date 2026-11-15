@@ -137,6 +137,18 @@ def register(subparsers) -> None:
             "script FILE."
         ),
     )
+    start.add_argument(
+        "--no-target-requests",
+        dest="no_target_requests",
+        default="",
+        metavar="REASON",
+        help=(
+            "State that this run sends no request to a declared target, for a "
+            "required-headers program where Vigil cannot attach or verify the "
+            "headers itself. Recorded on the audit row; refused when the argv "
+            "names a target."
+        ),
+    )
     start.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     start.add_argument(
         "--parent-command-run-id",
@@ -256,6 +268,7 @@ def _run_start(args) -> None:
             identity_scope=getattr(args, "identity_scope", "") or "",
             identity_target=getattr(args, "identity_target", "") or "",
             prepared_auth_context=getattr(args, "prepared_auth_context", None),
+            no_target_requests=str(getattr(args, "no_target_requests", "") or ""),
             report=prepare_report,
         )
         auth_context = merge_auth_context(auth_context, *identity_env_names)

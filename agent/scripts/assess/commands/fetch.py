@@ -274,7 +274,7 @@ def register(subparsers) -> None:
 
 
 def _is_engagement_scoped(endpoint: str) -> bool:
-    head = endpoint.strip("/").split("/", 1)[0]
+    head = endpoint.partition("?")[0].strip("/").split("/", 1)[0]
     return head in _ENGAGEMENT_SCOPED_PREFIXES
 
 

@@ -6077,3 +6077,38 @@ def test_a_body_only_probe_invents_no_http_status(monkeypatch, fake_engagement):
     probe = _probe_posts(fake_client)[0]
     assert probe["observed_http_status"] is None
     assert probe["result_status"] == "tested"
+
+
+_NUCLEI_AUDIT_FLAGS = [
+    "--technique", "RECON", "--intent", "refresh nuclei templates",
+    "--probe-kind", "fingerprint", "--phase", "recon", "--timeout", "300",
+]
+
+
+@pytest.mark.parametrize(
+    "update_args",
+    [["--update-templates"], ["--extra-args=-update-templates"], ["--extra-args=-ut"]],
+    ids=["typed", "extra-long", "extra-short"],
+)
+def test_nuclei_update_templates_runs_without_a_target(monkeypatch, update_args):
+    cli = _import("assess.cli")
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_nuclei", duration_ms=1)
+
+    cli.main(["kali", "nuclei", *update_args, *_NUCLEI_AUDIT_FLAGS])
+
+    assert captured["cmd"] == ["nuclei", "-update-templates"]
+    assert captured["kwargs"]["tool_name"] == "nuclei"
+
+
+def test_nuclei_update_templates_beside_a_target_says_to_run_them_apart(monkeypatch, capsys):
+    cli = _import("assess.cli")
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_nuclei", duration_ms=1)
+
+    with pytest.raises(SystemExit):
+        cli.main([
+            "kali", "nuclei", "--update-templates", "-u", "https://x.example.com",
+            *_NUCLEI_AUDIT_FLAGS,
+        ])
+
+    assert "cmd" not in captured
+    assert "--update-templates" in capsys.readouterr().err

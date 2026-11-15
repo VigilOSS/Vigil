@@ -30,13 +30,15 @@ public-Interactsh data-egress decision.
 
 ## Template management
 
-The runtime image ships the binary without templates, so the first run in a fresh runtime pays the
-download. Run the update as its own call so the sweep fits the `--timeout` ceiling:
+The runtime keeps templates under the persistent `/data/nuclei-templates`, so they survive a
+container recreate. A runtime start that finds none there begins downloading them in the
+background and says so on stderr; a scan started before that finishes sees a partial set.
+Download or refresh them as their own call (nuclei exits after updating, so it takes no target):
 
 ```bash
-vigil assess kali exec --technique HEALTH --intent "nuclei template update" \
-  --probe-kind fingerprint --phase recon --timeout 120 -- nuclei -ut
+vigil assess kali nuclei --update-templates --technique HEALTH --intent "nuclei template update" \
+  --probe-kind fingerprint --phase recon --timeout 300
 ```
 
-`nuclei -tl` under the same form lists installed templates. Template paths carry the protocol
+`vigil assess kali exec … -- nuclei -tl` lists the installed templates. Template paths carry the protocol
 prefix (`http/cves/`, `dns/`, `network/`).

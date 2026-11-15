@@ -51,6 +51,32 @@ def _parse(vector: str) -> dict[str, str]:
     return metrics
 
 
+_VERSION_PREFIXES = ("CVSS:3.1", "CVSS:4.0")
+
+
+def versioned_vector(vector: str) -> str | None:
+    """The vector with the version prefix its base metrics name, or ``None``.
+
+    The v3.1 and v4.0 base metric sets are disjoint (``S``/``C``/``I``/``A``
+    against ``AT``/``VC``…``SA``), so a complete base vector written without its
+    ``CVSS:`` prefix still names exactly one version. Returns ``None`` when the
+    vector already starts with ``CVSS:`` or is no complete base vector of
+    either version.
+    """
+    text = str(vector or "").strip()
+    if not text or text.startswith("CVSS:"):
+        return None
+    matches = []
+    for prefix in _VERSION_PREFIXES:
+        candidate = f"{prefix}/{text}"
+        try:
+            base_score(candidate)
+        except CvssVectorError:
+            continue
+        matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _round_up(value: float) -> float:
     return math.ceil((value * 10.0) - 1e-10) / 10.0
 

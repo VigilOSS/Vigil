@@ -84,11 +84,11 @@ def test_script_referencing_only_the_env_carrier_is_accepted(tmp_path):
 
 def test_script_without_the_header_refuses_before_any_traffic(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
-    _script(eng, "#!/bin/bash\ncurl https://app.example.com/a\n")
+    _script(eng, "import requests\nrequests.get('https://app.example.com/a')\n", "probe.py")
 
     with pytest.raises(ScopePolicyError) as excinfo:
         kali.prepare_execution_command(
-            ["bash", "scripts/probe.sh"], tool_name="bash", engagement_dir=eng
+            ["python3", "scripts/probe.py"], tool_name="python3", engagement_dir=eng
         )
 
     message = str(excinfo.value)
@@ -100,20 +100,20 @@ def test_header_name_in_comment_does_not_satisfy_script_check(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
     _script(
         eng,
-        "#!/bin/bash\n# X-HackerOne is required\ncurl https://app.example.com/a\n",
+        "# X-HackerOne is required\nimport requests\nrequests.get('https://app.example.com/a')\n",
+        "probe.py",
     )
 
     with pytest.raises(ScopePolicyError, match="X-HackerOne"):
         kali.prepare_execution_command(
-            ["bash", "scripts/probe.sh"], tool_name="bash", engagement_dir=eng
+            ["python3", "scripts/probe.py"], tool_name="python3", engagement_dir=eng
         )
 
 
-def test_unreadable_or_out_of_engagement_script_proceeds_as_unknown(tmp_path):
+def test_unreadable_or_out_of_engagement_script_is_refused_as_unknown(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
-    report = _attribution_report(["bash", "/etc/probe.sh"], tool_name="bash", eng=eng)
-
-    assert report["required_header_status"] == "unknown_script_unreadable"
+    with pytest.raises(ScopePolicyError, match="not readable beneath the engagement"):
+        _attribution_report(["bash", "/etc/probe.sh"], tool_name="bash", eng=eng)
 
 
 def test_foreign_container_script_is_refused_not_rebased_for_header_inspection(tmp_path):
@@ -142,9 +142,10 @@ def test_script_without_lexically_established_in_scope_request_is_not_refused(
     _script(eng, body)
     report = _attribution_report(["bash", "scripts/probe.sh"], tool_name="bash", eng=eng)
 
+    # A run-time target is carried by an attributed copy of the script.
     assert report["required_header_status"] in {
         "not_applicable_no_in_scope_url",
-        "unknown_dynamic_target",
+        "injected",
     }
 
 
@@ -268,18 +269,19 @@ def test_inline_interpreter_program_is_not_mistaken_for_a_script_file(
     tmp_path, command
 ) -> None:
     eng = _engagement(tmp_path, required=_HANDLE)
-    report = _attribution_report(command, tool_name=command[0], eng=eng)
-
-    assert report["required_header_status"] == "warned"
+    with pytest.raises(ScopePolicyError, match="the inline program"):
+        _attribution_report(command, tool_name=command[0], eng=eng)
 
 
 def test_long_inline_interpreter_program_never_reaches_filesystem_path_lookup(
     tmp_path,
 ) -> None:
     eng = _engagement(tmp_path, required=_HANDLE)
-    report = _attribution_report(["node", "-e", "fetch('https://app.example.com/a');" + ("x" * 10_000)], tool_name="node", eng=eng)
-
-    assert report["required_header_status"] == "warned"
+    with pytest.raises(ScopePolicyError, match="the inline program"):
+        _attribution_report(
+            ["node", "-e", "fetch('https://app.example.com/a');" + ("x" * 10_000)],
+            tool_name="node", eng=eng,
+        )
 
 
 @pytest.mark.parametrize(
@@ -295,13 +297,8 @@ def test_long_inline_interpreter_program_never_reaches_filesystem_path_lookup(
             "probe.js",
             "fetch('https://app.example.com/a');\n",
         ),
-        (
-            ["bash", "-O", "extglob", "scripts/probe.sh"],
-            "probe.sh",
-            "curl https://app.example.com/a\n",
-        ),
     ],
-    ids=["python-warning", "node-require", "bash-shell-option"],
+    ids=["python-warning", "node-require"],
 )
 def test_interpreter_option_values_are_skipped_before_the_script_file(
     tmp_path, command, script_name, body
@@ -315,6 +312,18 @@ def test_interpreter_option_values_are_skipped_before_the_script_file(
             tool_name=command[0],
             engagement_dir=eng,
         )
+
+
+def test_shell_option_values_are_skipped_before_the_script_file(tmp_path) -> None:
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(eng, "curl https://app.example.com/a\n")
+    command = ["bash", "-O", "extglob", "scripts/probe.sh"]
+
+    report = _attribution_report(command, tool_name="bash", eng=eng)
+
+    assert report["required_header_status"] == "injected"
+    assert command[:3] == ["bash", "-O", "extglob"]
+    assert command[3].startswith("scripts/.probe.attributed-")
 
 
 def test_a_passive_tool_is_skipped_not_refused(tmp_path):
@@ -380,9 +389,8 @@ def test_a_run_that_makes_no_target_traffic_needs_no_attribution(
 )
 def test_an_offline_tool_beside_a_traffic_capable_command_is_not_exempt(tmp_path, command):
     eng = _engagement(tmp_path, required=_HANDLE)
-    report = _attribution_report(command, tool_name="jsluice", eng=eng)
-
-    assert report["required_header_status"] == "warned"
+    with pytest.raises(ScopePolicyError, match="X-HackerOne"):
+        _attribution_report(command, tool_name="jsluice", eng=eng)
 
 
 # --------------------------------------------------------------------------- #

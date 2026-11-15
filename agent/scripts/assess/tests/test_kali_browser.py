@@ -1116,3 +1116,88 @@ def test_declared_navigate_steps_are_checked_too(tmp_path, eng_dir, monkeypatch,
     err = capsys.readouterr().err
     assert "admin.example.com" in err
     assert "app.example.com will be" not in err
+
+
+# --------------------------------------------------------------------------- #
+# The printed result stays bounded and says where the rest is.
+# --------------------------------------------------------------------------- #
+
+
+def _driver_output(tmp_path: Path) -> tuple[Path, dict]:
+    output = {
+        "url": "https://app.example.com/",
+        "screenshot": "scans/browser/app.png",
+        "dom_path": "scans/browser/app.html",
+        "network": [
+            {"event": "request", "method": "GET", "url": f"https://app.example.com/a{n}",
+             "resource_type": "script", "header_names": ["accept"]}
+            for n in range(300)
+        ],
+        "console": [{"type": "log", "text": f"line {n}"} for n in range(60)],
+        "route_candidates": [
+            {"method": "GET", "origin": "https://app.example.com", "path": f"/a{n}",
+             "resource_type": "script"}
+            for n in range(120)
+        ],
+        "dropped": {"network": 40},
+        "http_status": 200,
+        "title": "Acme",
+        "screenshot_ok": True,
+    }
+    path = tmp_path / "run.out"
+    path.write_text(json.dumps(output) + "\n", encoding="utf-8")
+    return path, output
+
+
+def test_the_printed_result_names_the_driver_by_digest_not_its_source(monkeypatch, tmp_path):
+    stdout_path, _output = _driver_output(tmp_path)
+
+    def recorder(cmd, *, tool_name, **kwargs):
+        result = _mk_result()
+        result.stdout_path = str(stdout_path)
+        result.resolved_argv = list(cmd)
+        return result
+
+    monkeypatch.setattr(kb, "kali_exec", recorder)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        kb.run(_browser_args(har_out="scans/browser/app.har"))
+    printed = json.loads(out.getvalue())
+
+    assert kb._BROWSER_DRIVER not in printed["resolved_argv"]
+    digest = __import__("hashlib").sha256(kb._BROWSER_DRIVER.encode()).hexdigest()
+    assert any(digest in token for token in printed["resolved_argv"])
+    assert len(out.getvalue()) < 16_000
+
+    preview = printed["stdout_preview"]
+    summary = json.loads(preview.splitlines()[0])
+    assert summary["title"] == "Acme" and summary["http_status"] == 200
+    assert len(summary["network"]) < 300
+    omitted = preview.splitlines()[1]
+    assert str(stdout_path) in omitted
+    assert "scans/browser/app.har" in omitted and "scans/browser/app.html" in omitted
+    assert "network" in omitted and "40" in omitted
+
+
+def test_a_small_driver_result_is_printed_whole(monkeypatch, tmp_path):
+    path = tmp_path / "run.out"
+    path.write_text(json.dumps({"url": "https://app.example.com/", "network": [], "title": "Acme"}) + "\n")
+
+    def recorder(cmd, *, tool_name, **kwargs):
+        result = _mk_result()
+        result.stdout_path = str(path)
+        return result
+
+    monkeypatch.setattr(kb, "kali_exec", recorder)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        kb.run(_browser_args())
+    preview = json.loads(out.getvalue())["stdout_preview"]
+
+    assert json.loads(preview)["title"] == "Acme"
+    assert "omitted" not in preview
+
+
+def test_the_driver_counts_what_its_own_caps_drop():
+    for key in ("network", "console", "route_candidates"):
+        assert f'result["dropped"]["{key}"]' in kb._BROWSER_DRIVER

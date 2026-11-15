@@ -1,6 +1,8 @@
 """Audited Playwright/Chromium browser workflow for target application evidence."""
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import re
 import sys
@@ -82,6 +84,8 @@ result = {
     "url": cfg["url"], "screenshot": cfg.get("screenshot"),
     "dom_path": cfg.get("dom_path"), "network": [], "console": [],
     "route_candidates": [], "omitted_attribution_origins": [], "steps": [],
+    # Events past each MAX_* cap are counted, not kept.
+    "dropped": {"network": 0, "console": 0, "route_candidates": 0},
 }
 network = result["network"]
 console = result["console"]
@@ -122,33 +126,44 @@ def host_admitted(host):
     return not any(entry_matches(entry, host) for entry in deny_entries)
 
 def add_candidate(request):
-    if len(result["route_candidates"]) >= MAX_ROUTE_CANDIDATES:
-        return
     parsed = urlsplit(request.url)
     key = (request.method, parsed.scheme, parsed.netloc, parsed.path)
     if key in candidate_keys:
         return
     candidate_keys.add(key)
+    if len(result["route_candidates"]) >= MAX_ROUTE_CANDIDATES:
+        result["dropped"]["route_candidates"] += 1
+        return
     result["route_candidates"].append({
         "method": request.method, "origin": origin(request.url),
         "path": parsed.path or "/", "resource_type": request.resource_type,
     })
 
-def on_request(request):
+def keep_network(event):
     if len(network) < MAX_NETWORK_EVENTS:
-        network.append({
-            "event": "request", "method": request.method, "url": request.url,
-            "resource_type": request.resource_type,
-            "header_names": sorted(str(k).lower() for k in request.headers),
-        })
+        network.append(event)
+    else:
+        result["dropped"]["network"] += 1
+
+def keep_console(event):
+    if len(console) < MAX_CONSOLE_EVENTS:
+        console.append(event)
+    else:
+        result["dropped"]["console"] += 1
+
+def on_request(request):
+    keep_network({
+        "event": "request", "method": request.method, "url": request.url,
+        "resource_type": request.resource_type,
+        "header_names": sorted(str(k).lower() for k in request.headers),
+    })
     add_candidate(request)
 
 def on_response(response):
-    if len(network) < MAX_NETWORK_EVENTS:
-        network.append({
-            "event": "response", "url": response.url, "status": response.status,
-            "header_names": sorted(str(k).lower() for k in response.headers),
-        })
+    keep_network({
+        "event": "response", "url": response.url, "status": response.status,
+        "header_names": sorted(str(k).lower() for k in response.headers),
+    })
     if not cfg.get("capture_bodies") or response.request.resource_type not in ("document", "xhr", "fetch"):
         return
     try:
@@ -227,8 +242,8 @@ with sync_playwright() as playwright:
     page = context.new_page()
     page.on("request", on_request)
     page.on("response", on_response)
-    page.on("console", lambda msg: console.append({"type": msg.type, "text": msg.text}) if len(console) < MAX_CONSOLE_EVENTS else None)
-    page.on("pageerror", lambda exc: console.append({"type": "pageerror", "text": str(exc)}) if len(console) < MAX_CONSOLE_EVENTS else None)
+    page.on("console", lambda msg: keep_console({"type": msg.type, "text": msg.text}))
+    page.on("pageerror", lambda exc: keep_console({"type": "pageerror", "text": str(exc)}))
     failed = False
     try:
         response = page.goto(cfg["url"], wait_until=cfg.get("wait_until") or "domcontentloaded", timeout=page_timeout_ms)
@@ -293,6 +308,95 @@ with sync_playwright() as playwright:
         browser.close()
     emit(result, 6 if failed else 0)
 '''
+
+
+# The printed result names the driver by digest: its ~13 KB source is Vigil's
+# own, identical on every run, and the audit row keeps the argv that ran.
+_DRIVER_DIGEST = hashlib.sha256(_BROWSER_DRIVER.encode("utf-8")).hexdigest()
+_DRIVER_LABEL = (
+    f"<vigil browser driver sha256:{_DRIVER_DIGEST}, {len(_BROWSER_DRIVER)} bytes: "
+    "_BROWSER_DRIVER in assess/commands/kali_browser.py>"
+)
+# How many entries of each driver list the printed preview keeps; the rest stay
+# in the run's stdout file, the HAR and the DOM.
+_PREVIEW_LIST_LIMITS = {
+    "network": 10,
+    "console": 20,
+    "route_candidates": 40,
+    "bodies": 20,
+    "body_warnings": 10,
+}
+_MAX_DRIVER_OUTPUT_BYTES = 16 * 1024 * 1024
+
+
+def _driver_output(result) -> dict[str, Any] | None:
+    """The driver's JSON result, read from the run's full stdout when it can be."""
+    text = ""
+    path = Path(str(result.stdout_path or ""))
+    try:
+        if path.is_file() and path.stat().st_size <= _MAX_DRIVER_OUTPUT_BYTES:
+            text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    for source in (text, str(result.stdout_preview or "")):
+        for line in reversed(source.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                return value
+    return None
+
+
+def _bounded_preview(result, *, har_out: str, dom_out: str) -> str:
+    """The driver result with each list capped, plus a line naming what was left out."""
+    output = _driver_output(result)
+    if output is None:
+        return str(result.stdout_preview or "")
+    summary = dict(output)
+    shown: list[str] = []
+    for key, limit in _PREVIEW_LIST_LIMITS.items():
+        items = summary.get(key)
+        if isinstance(items, list) and len(items) > limit:
+            summary[key] = items[:limit]
+            shown.append(f"the first {limit} of {len(items)} {key}")
+    dropped = {
+        key: int(count)
+        for key, count in (output.get("dropped") or {}).items()
+        if isinstance(count, int) and count > 0
+    }
+    preview = json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+    if not shown and not dropped:
+        return preview
+    parts = []
+    if shown:
+        parts.append("this preview keeps " + ", ".join(shown))
+    if dropped:
+        parts.append(
+            "the driver kept its capped lists and counted "
+            + ", ".join(f"{count} more {key}" for key, count in sorted(dropped.items()))
+            + " it did not keep"
+        )
+    where = [f"full driver output: {result.stdout_path}"]
+    if har_out:
+        where.append(f"every request: HAR {har_out}")
+    where.append(f"rendered DOM: {output.get('dom_path') or dom_out}")
+    return preview + "\n[vigil] browser preview omitted: " + "; ".join(parts) + ". " + "; ".join(where) + "."
+
+
+def _printed_result(result, *, har_out: str, dom_out: str):
+    return dataclasses.replace(
+        result,
+        resolved_argv=[
+            _DRIVER_LABEL if token == _BROWSER_DRIVER else token
+            for token in result.resolved_argv
+        ],
+        stdout_preview=_bounded_preview(result, har_out=har_out, dom_out=dom_out),
+    )
 
 
 def register(subparsers) -> None:
@@ -736,4 +840,4 @@ def run(args) -> None:
     kwargs["identity"] = None
     kwargs["prepared_auth_context"] = prepared_auth_context
     result = kali_exec(cmd, tool_name="browser", **kwargs)
-    emit_result(result)
+    emit_result(_printed_result(result, har_out=har_out, dom_out=dom_out))

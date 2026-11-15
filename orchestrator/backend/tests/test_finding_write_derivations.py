@@ -75,6 +75,51 @@ def test_record_with_only_a_vector_stores_its_computed_score(client, seeded):
     )["derived"]
 
 
+@pytest.mark.parametrize(
+    ("bare", "versioned", "score"),
+    [
+        ("AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", 5.3),
+        (
+            "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+            8.7,
+        ),
+    ],
+)
+def test_a_bare_vector_stores_the_version_prefix_its_metrics_name(
+    client, seeded, bare, versioned, score
+):
+    # The base metric sets of v3.1 (S, C/I/A) and v4.0 (AT, VC..SA) are
+    # disjoint, so a vector without its prefix still names exactly one version.
+    response = client.post(f"{BASE}/findings", json={
+        "slug": "VA-606", "title": "VA-606 finding", "severity": "high",
+        "workflow_status": "active", "verification_status": "unreviewed",
+        "canonical_location": "https://example.test/VA-606", "summary": "s",
+        "source_name": "hunter-a", "provenance": {"agent_id": "HUNT-A"},
+        "details": {"evidence": "e", "impact": "i", "cvss_vector": bare},
+    })
+
+    assert response.status_code == 201, response.text
+    derived = _derived(response)
+    assert derived["details.cvss_vector"]["value"] == versioned
+    assert derived["details.cvss_vector"]["derived_from"] == "details.cvss_vector"
+    assert derived["details.cvss_score"]["value"] == score
+    assert _details(client, "VA-606")["cvss_vector"] == versioned
+
+
+def test_a_bare_vector_that_is_no_complete_base_vector_is_still_refused(client, seeded):
+    response = client.post(f"{BASE}/findings", json={
+        "slug": "VA-607", "title": "VA-607 finding", "severity": "high",
+        "workflow_status": "active", "verification_status": "unreviewed",
+        "canonical_location": "https://example.test/VA-607", "summary": "s",
+        "source_name": "hunter-a", "provenance": {"agent_id": "HUNT-A"},
+        "details": {"evidence": "e", "impact": "i", "cvss_vector": "AV:N/AC:L/PR:N/UI:N/S:U/C:L"},
+    })
+
+    assert response.status_code == 400, response.text
+    assert "CVSS:3.1 or CVSS:4.0" in response.json()["detail"]
+
+
 def test_a_vector_only_patch_that_contradicts_the_stored_score_is_refused(client, seeded):
     # The stored score is a value someone recorded; a vector that computes to a
     # different one contradicts it, so the write names both instead of

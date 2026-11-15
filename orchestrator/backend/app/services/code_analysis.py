@@ -3750,9 +3750,28 @@ def bulk_create_code_modules(
             (engagement.id, repo_id),
         ).fetchall()
         file_by_path = {str(row["file_path"]): int(row["id"]) for row in repo_files}
-        repo_file_ids = {int(row["id"]) for row in repo_files}
+        resolved = [_resolve_module_files(m, file_by_path) for m in modules]
+        unknown = [
+            (m["module_key"], entries) for m, (_ids, _derived, entries) in zip(modules, resolved)
+            if entries
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Code file not found for these module entries: "
+                    + "; ".join(
+                        f"module {key!r}: {', '.join(entries)}" for key, entries in unknown
+                    )
+                    + f". Each `files` entry is a file_path of repo {repo_id}'s admitted "
+                    "inventory, or a directory prefix ending in '/' that takes every admitted "
+                    "file under it; each `file_ids` entry is a file id of that repo. Nothing "
+                    "was written."
+                ),
+            )
+        derivations: dict[int, list[dict[str, Any]]] = {}
 
-        for m in modules:
+        for m, (selected_ids, module_derived, _unknown) in zip(modules, resolved):
             connection.execute(
                 """
                 INSERT INTO code_modules (
@@ -3781,16 +3800,7 @@ def bulk_create_code_modules(
             assert row is not None
             module_id = int(row["id"])
             created.append(module_id)
-
-            selected_ids: set[int] = set()
-            for file_id in m.get("file_ids", []):
-                selected_ids.add(int(file_id))
-            for file_path in m.get("files", []):
-                if file_path not in file_by_path:
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
-                selected_ids.add(file_by_path[file_path])
-            if not selected_ids.issubset(repo_file_ids):
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+            derivations[module_id] = module_derived
 
             if selected_ids:
                 keep_placeholders = ",".join("?" for _ in selected_ids)
@@ -3838,8 +3848,54 @@ def bulk_create_code_modules(
                 (engagement.id, module_id),
             ).fetchone()
             assert row is not None
-            rows.append(dict(row))
+            rows.append({**dict(row), "derived": derivations[module_id]})
     return rows
+
+
+def _resolve_module_files(
+    module: dict[str, Any], file_by_path: dict[str, int]
+) -> tuple[set[int], list[dict[str, Any]], list[str]]:
+    """The file ids one module definition selects, what was derived, and what is unknown.
+
+    An entry ending in ``/`` names a directory: it takes every admitted file under
+    that prefix, and the expansion is returned as a ``derived`` entry so the caller
+    sees which files it stood for. Every entry that names no admitted file (or a
+    prefix with none under it) and every file id outside the repo is collected, so
+    one refusal lists them all.
+    """
+    repo_file_ids = set(file_by_path.values())
+    selected: set[int] = set()
+    derived: list[dict[str, Any]] = []
+    unknown: list[str] = []
+    for file_id in module.get("file_ids", []):
+        if int(file_id) in repo_file_ids:
+            selected.add(int(file_id))
+        else:
+            unknown.append(f"file_id {int(file_id)}")
+    for file_path in module.get("files", []):
+        if file_path in file_by_path:
+            selected.add(file_by_path[file_path])
+            continue
+        if file_path.endswith("/"):
+            under = sorted(path for path in file_by_path if path.startswith(file_path))
+            if under:
+                selected.update(file_by_path[path] for path in under)
+                derived.append({
+                    "field": "files",
+                    "value": under,
+                    "derived_from": file_path,
+                    "detail": (
+                        f"files entry {file_path!r} is a directory prefix; assigned the "
+                        f"{len(under)} admitted file(s) under it"
+                    ),
+                })
+                continue
+        directory = file_path.rstrip("/") + "/"
+        if not file_path.endswith("/") and any(path.startswith(directory) for path in file_by_path):
+            unknown.append(f"{file_path!r} (a directory: send {directory!r} for the files under it)")
+        else:
+            unknown.append(repr(file_path))
+    return selected, derived, unknown
 
 
 def list_code_modules(
@@ -13632,6 +13688,26 @@ def _apply_requeue_target(
             resolved_trigger_ids,
         )
 
+    resolved_here = set(resolved_trigger_ids)
+    for selected_trigger_id, context in target["selected_trigger_context"]:
+        if selected_trigger_id not in resolved_here:
+            target["cross_file_triggers"] = _merge_unique_values(
+                target["cross_file_triggers"], [context]
+            )
+    if resolved_here and not pending_trigger_rows and not target["cross_file_triggers"]:
+        # Every trigger this target was sent for is resolved by its current
+        # review, so an attempt would reopen a covered file with nothing owed.
+        _sync_trigger_status_for_file(connection, engagement_id, file_id)
+        assert latest is not None
+        return (
+            "already_completed",
+            int(latest["id"]),
+            "current review already resolves trigger(s) "
+            + ", ".join(str(trigger_id) for trigger_id in sorted(resolved_here))
+            + "; no live trigger is left, so no attempt was queued",
+            False,
+        )
+
     bucket_triggers = target["cross_file_triggers"]
     existing_trigger_ids = {
         int(entry["trigger_id"])
@@ -14078,6 +14154,9 @@ def requeue_triggered_files(
                     "slot_types": [],
                     "guidance_hypotheses": [],
                     "cross_file_triggers": [],
+                    # Context an input sent beside the trigger it selected; it
+                    # is owed only while that trigger is.
+                    "selected_trigger_context": [],
                     "blocked_reason": None,
                 },
             )
@@ -14122,7 +14201,11 @@ def requeue_triggered_files(
             trigger_payload = _requeue_trigger_payload(
                 item, file_path=target["file_path"]
             )
-            if trigger_payload is not None:
+            if trigger_payload is not None and "trigger_id" in selector:
+                target["selected_trigger_context"].append(
+                    (int(selector["trigger_id"]), trigger_payload)
+                )
+            elif trigger_payload is not None:
                 target["cross_file_triggers"] = _merge_unique_values(
                     target["cross_file_triggers"], [trigger_payload]
                 )
@@ -14193,6 +14276,10 @@ TRIGGER_PAGE_DEFAULT = 100
 TRIGGER_PAGE_MAX = 1000
 
 
+# The `status` filter value that selects every trigger status.
+TRIGGER_STATUS_FILTER_ALL = "all"
+
+
 def list_code_triggers(
     engagement_id: int,
     *,
@@ -14216,10 +14303,16 @@ def list_code_triggers(
     ``include_superseded``.
     """
     engagement = _engagement_or_404(engagement_id)
+    if status_filter == TRIGGER_STATUS_FILTER_ALL:
+        status_filter = None
     if status_filter and status_filter not in _TRIGGER_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid trigger status: {status_filter}",
+            detail=(
+                f"invalid trigger status: {status_filter}; a trigger is one of "
+                + ", ".join(sorted(_TRIGGER_STATUSES))
+                + f", or pass {TRIGGER_STATUS_FILTER_ALL} for every status"
+            ),
         )
     if origin is not None and origin not in {TRIGGER_ORIGIN_DEPTH_FLOOR, TRIGGER_ORIGIN_CROSS_FILE}:
         raise HTTPException(

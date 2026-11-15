@@ -1,13 +1,15 @@
-"""Required-header injection remains best-effort and never blocks execution."""
+"""A run whose requests cannot carry the required headers never starts."""
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
 
+import pytest
 from assess.lib import kali
+from assess.lib.client import AssessError
 
 
-def test_kali_exec_warns_and_runs_when_required_header_cannot_be_injected(
+def test_kali_exec_refuses_a_run_whose_required_header_cannot_be_attached(
     tmp_path, monkeypatch, capsys
 ) -> None:
     eng_dir = tmp_path / "engagements" / "eng"
@@ -59,21 +61,18 @@ def test_kali_exec_warns_and_runs_when_required_header_cannot_be_injected(
     monkeypatch.setattr(kali, "_kill_in_container", lambda *_a, **_k: None)
     monkeypatch.setattr(kali, "_cleanup_container_pid_file", lambda *_a, **_k: None)
 
-    result = kali.kali_exec(
-        ["bash", "-c", "whatweb https://app.example.com"],
-        technique="DISCOVERY",
-        intent="fingerprint app",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=eng_dir,
-        tool_name="whatweb",
-    )
+    with pytest.raises(AssessError) as excinfo:
+        kali.kali_exec(
+            ["bash", "-c", "whatweb https://app.example.com"],
+            technique="DISCOVERY",
+            intent="fingerprint app",
+            probe_kind="fingerprint",
+            phase="recon",
+            timeout=30,
+            agent_name="recon-specialist",
+            engagement_dir=eng_dir,
+            tool_name="whatweb",
+        )
 
-    assert result.status != "refused"
-    assert result.return_code == 0
-    assert "argv" in popen_seen
-    warning = capsys.readouterr().err
-    assert "could not be injected" in warning
-    assert "X-Bug-Bounty" in warning
+    assert "argv" not in popen_seen
+    assert "X-Bug-Bounty" in str(excinfo.value)

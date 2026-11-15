@@ -94,18 +94,30 @@ bugcrowd --researcher <handle>`, `--header "Name: Value"`, or later `vigil engag
 them depends on the tool:
 
 - **Injected** (`curl`, `httpx`, `nuclei`, `ffuf`, `sqlmap`, `katana`, `dalfox` via `-H`;
-  `whatweb` via `--header`, `nikto` via `-Add-header`, `arjun` via `--headers`): the header lands
-  in the recorded argv, so `command-run list` proves the traffic was tagged. `kali browser` hands
-  the headers to the Playwright driver instead of the argv.
+  `whatweb` via `--header`, `nikto` via `-Add-header`, `arjun` via `--headers`; `wafw00f` via a
+  headers file under `scans/kali/required-headers/` that keeps its default header set and any
+  `-H` file you pass): the header lands in the recorded argv, so `command-run list` proves the
+  traffic was tagged. `kali browser` hands the headers to the Playwright driver instead of the
+  argv. A shell script FILE (`sh scripts/x.sh`) that reaches a declared host, or builds its
+  targets at run time, runs as an attributed copy beside it (`scripts/.x.attributed-<digest>.sh`)
+  whose curl/wget carry the headers.
 - **Skipped on purpose** (`gau`, `waybackurls`, `subfinder`, `amass`, `dnsx`, `puredns`, `nmap`,
   `naabu`, `masscan`, `tlsx`): these hit third-party archives, DNS, or L3-L6 without HTTP, and
   injecting would leak the researcher handle to web.archive.org or CommonCrawl.
 - **Not applicable, offline** (`which`, `find` without `-exec`, `jsluice`, `uro`, `trufflehog
   filesystem`, and text tools such as `grep` or `jq`): a run whose every command reads only local
   files makes no target traffic, so it needs no header and records `not_applicable_offline`.
-- **Warned, runs untagged** (`wafw00f`, whose `-H` reads a file, and any tool without a known
-  header flag): if the tool reaches the in-scope target, carry the header another way. A non-HTTP tool the
-  program still wants tagged is the operator's to handle out of band.
+- **Read from the program** (a python/node/ruby/perl/php script or inline `-c`/`-e` program, and
+  shell scripts with no curl/wget to rewrite): one that names the headers (or
+  `$VIGIL_REQUIRED_HEADERS` / `$VIGIL_REQUIRED_HEADER_<NAME>`, exported for every run) proceeds;
+  one whose literal requests all name hosts outside scope proceeds untagged.
+- **Refused before it starts**: a literal request to a declared host without the headers, a
+  program that builds its targets at run time without naming them, a script Vigil cannot read
+  beneath the engagement, and any tool with no header flag Vigil can fill. Send the requests with
+  a tool Vigil injects into, or reference the env carrier in the script. A run that sends no
+  request to a declared target (it parses stored output, talks to a local mock) passes
+  `--no-target-requests '<why>'`; the audit row records the statement, and a run whose argv names
+  a target is refused anyway.
 
 ## Out-of-scope carve-outs
 

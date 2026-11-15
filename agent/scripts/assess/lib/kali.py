@@ -28,6 +28,7 @@ without touching the rest of the suite.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import os
 import re
@@ -106,7 +107,11 @@ from .kali_output import (
     _read_proc_peak_rss,
     _read_safely,
     _required_headers,
+    _SHELL_SUBCMD_HEAD_RE,
+    _inject_headers_into_script,
+    _shell_segment_end,
     _scope_version,
+    _simple_commands,
     _utcnow_iso,
     _wrapped_shell_script_index,
     curl_multi_arm_warning,
@@ -138,7 +143,6 @@ from .kali_tool_naming import (
     _split_inner_pipeline_stages,
 )
 from .execution_recency import emit_foreign_lane_recency
-from . import run_notices
 
 # Test-mode override: when set, skips both audit POST and `docker exec` so
 # argparse round-trip tests don't require a live backend or container. The
@@ -1580,6 +1584,214 @@ def _script_target_classification(
     return "unknown_dynamic_target" if dynamic else "not_applicable_no_in_scope_url"
 
 
+# wafw00f's ``-H/--headers`` names a FILE whose ``Name: Value`` lines REPLACE its
+# default header set, so the file Vigil writes carries that set too (mirrored
+# from wafw00f 2.4.2 ``lib/evillib.py`` ``def_headers``, the runtime image's
+# version) and the run keeps wafw00f's own request shape. wafw00f keeps a line
+# only when it splits into exactly two parts on ``:``, so a value holding a colon
+# cannot ride it.
+_WAFW00F_DEFAULT_HEADERS: dict[str, str] = {
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,"
+        "image/apng,*/*;q=0.8,application/signed-exchange;v=b3"
+    ),
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) "
+        "Gecko/20100101 Firefox/130.0"
+    ),
+    "Accept-Language": "en-US,en;q=0.5",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site",
+    "Priority": "u=0, i",
+    "DNT": "1",
+}
+_WAFW00F_HEADER_FLAGS = ("-H", "--headers")
+# Where Vigil writes the files a run needs to carry the attribution headers.
+_ATTRIBUTION_FILES_DIR = ("scans", "kali", "required-headers")
+
+
+def _engagement_argv_path(
+    host_path: Path, root: Path, *, container_paths: bool
+) -> str:
+    """The argv spelling of an engagement file: its container path, or the host path."""
+    if container_paths:
+        return f"/engagements/{root.name}/{host_path.relative_to(root).as_posix()}"
+    return str(host_path)
+
+
+def _wafw00f_header_lines(text: str) -> dict[str, str]:
+    """The headers wafw00f itself reads from a headers file (``main.getheaders``)."""
+    headers: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 2:
+            headers[parts[0].strip()] = parts[1].strip()
+    return headers
+
+
+def _attribute_wafw00f(
+    cmd: list[str],
+    *,
+    root: Path,
+    headers: dict[str, str],
+    execution_cwd: Path | None,
+    container_paths: bool,
+) -> str:
+    """Carry ``headers`` on a wafw00f run through the headers file it reads.
+
+    An operator headers file is kept: its headers stay first and the required
+    ones are added (required values win a name collision). Returns
+    ``"injected"`` or ``"noop"``; refuses a header wafw00f's file format would
+    silently drop, and an operator file Vigil cannot read beneath the engagement.
+    """
+    uncarriable = sorted(name for name, value in headers.items() if ":" in value)
+    if uncarriable:
+        raise scope_lib.ScopePolicyError(
+            "wafw00f reads extra headers from a file and keeps a line only when it "
+            "has a single colon, so the program-required header(s) "
+            f"{', '.join(uncarriable)} (whose values contain ':') cannot ride it. "
+            "Fingerprint the WAF with `vigil assess kali httpx` or `kali curl`, where "
+            "Vigil injects them as -H."
+        )
+    flag_index = next(
+        (index for index, token in enumerate(cmd[:-1]) if token in _WAFW00F_HEADER_FLAGS),
+        None,
+    )
+    base = dict(_WAFW00F_DEFAULT_HEADERS)
+    if flag_index is not None:
+        supplied = cmd[flag_index + 1]
+        path = scope_lib.execution_script_path(
+            supplied, root, execution_cwd=execution_cwd, container_paths=container_paths
+        )
+        try:
+            text = path.read_text(encoding="utf-8") if path is not None else None
+        except OSError:
+            text = None
+        if text is None:
+            raise scope_lib.ScopePolicyError(
+                f"wafw00f headers file '{supplied}' is not readable beneath the "
+                "engagement, so Vigil cannot add the program-required header(s) "
+                f"{', '.join(sorted(headers))} to it. Store it under the engagement "
+                "(for example scans/headers.txt) and pass that path."
+            )
+        base = _wafw00f_header_lines(text)
+        if all(base.get(name) == value for name, value in headers.items()):
+            return "noop"
+    merged = {**base, **headers}
+    body = "".join(f"{name}: {value}\n" for name, value in merged.items())
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+    target = root.joinpath(*_ATTRIBUTION_FILES_DIR, f"wafw00f-{digest}.txt")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.is_file():
+        target.write_text(body, encoding="utf-8")
+    argv_path = _engagement_argv_path(target, root, container_paths=container_paths)
+    if flag_index is not None:
+        cmd[flag_index + 1] = argv_path
+    else:
+        cmd.extend(["-H", argv_path])
+    return "injected"
+
+
+def _attributed_script_copy(
+    cmd: list[str], script: str, path: Path, text: str, headers: dict[str, str]
+) -> str:
+    """Run a shell script FILE as a copy whose curl/wget carry ``headers``.
+
+    The copy is written beside the original (content-addressed, so a re-run
+    reuses it) and keeps its directory, so ``$0``-relative paths still resolve;
+    the original is never edited. Returns the injector status: ``"injected"``
+    when ``cmd`` now runs the copy, ``"noop"`` when every request already carries
+    the headers, ``"none"`` when the script has no request the injector can reach.
+    """
+    status, attributed = _inject_headers_into_script(text, headers)
+    if status != "injected":
+        return status
+    digest = hashlib.sha256(attributed.encode("utf-8")).hexdigest()[:12]
+    copy = path.with_name(f".{path.stem}.attributed-{digest}{path.suffix}")
+    if not copy.is_file():
+        copy.write_text(attributed, encoding="utf-8")
+        copy.chmod(path.stat().st_mode & 0o777)
+    index = cmd.index(script)
+    directory, _name = os.path.split(script)
+    cmd[index] = os.path.join(directory, copy.name) if directory else copy.name
+    print(
+        f"required headers: running attributed copy {cmd[index]} of {script} "
+        f"(curl/wget there carry {', '.join(sorted(headers))}).",
+        file=sys.stderr,
+    )
+    return "injected"
+
+
+def _inline_program(cmd: list[str]) -> tuple[str, str] | None:
+    """``(interpreter, source)`` when ``cmd`` runs inline program text, else ``None``."""
+    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
+    if not effective:
+        return None
+    head = os.path.basename(effective[0]).lower()
+    if head in _SHELL_BINARIES:
+        index = _wrapped_shell_script_index(cmd)
+        return (head, cmd[index]) if index is not None else None
+    flags = scope_lib._INTERPRETER_INLINE_SOURCE_FLAGS.get(head, frozenset())
+    for index in range(1, len(effective) - 1):
+        if effective[index] in flags:
+            return head, str(effective[index + 1])
+    return None
+
+
+def _shell_requests_are_dynamic(text: str) -> bool:
+    """True when a curl/wget-style request in shell ``text`` takes an expanded word.
+
+    ``curl "$u"`` inside a loop over target URLs names no literal URL, so the
+    lexical classification sees no in-scope request; the expansion is what says
+    the request target is decided at run time.
+    """
+    for match in _SHELL_SUBCMD_HEAD_RE.finditer(text):
+        segment = text[match.end("cmd") : _shell_segment_end(text, match.end("cmd"))]
+        if "$" in segment or "`" in segment:
+            return True
+    return False
+
+
+def _program_attribution(
+    text: str, root: Path, *, script_head: str, headers: dict[str, str]
+) -> tuple[str, list[str]]:
+    """Attribution status for program text the run executes (file or inline).
+
+    Returns ``(status, missing)``. ``not_applicable_no_in_scope_url`` when every
+    literal request names a host outside the declaration and none is built at
+    run time; otherwise ``referenced_in_script`` when the text names every
+    required header (or its env carrier), ``in_scope`` for a literal request to a
+    declared target without them (``missing`` names them), and
+    ``unknown_dynamic_target`` for a run-time target.
+    """
+    classification = _script_target_classification(text, root, script_head=script_head)
+    if (
+        classification == "not_applicable_no_in_scope_url"
+        and script_head in _SHELL_BINARIES
+        and _shell_requests_are_dynamic(text)
+    ):
+        classification = "unknown_dynamic_target"
+    if classification == "not_applicable_no_in_scope_url":
+        return classification, []
+    missing = _script_references_required_headers(text, headers, script_head=script_head)
+    if not missing:
+        return "referenced_in_script", []
+    return classification, missing
+
+
+def _refuse_unattributed_program(label: str, missing: list[str]) -> None:
+    raise scope_lib.ScopePolicyError(
+        f"{label} never references the program-required attribution header(s) "
+        f"{', '.join(sorted(missing))}, while it contains a literal request form for "
+        "a declared target. ROE makes attribution mandatory on every request. Add the "
+        f"headers to each request (the values are exported as ${_REQUIRED_HEADER_ENV_ALL} "
+        f"and ${_REQUIRED_HEADER_ENV_PREFIX}<NAME> for this run), or send the requests "
+        "with curl/wget, where Vigil injects them."
+    )
+
+
 def _verify_required_headers_in_script(
     cmd: list[str],
     *,
@@ -1588,72 +1800,161 @@ def _verify_required_headers_in_script(
     tool_name: str,
     execution_cwd: Path | None = None,
     container_paths: bool = True,
+    attributed_copy: bool = True,
 ) -> str:
-    """Resolve a ``warned`` required-header outcome against the script it runs.
+    """Resolve a ``warned`` required-header outcome against what the run executes.
 
-    Returns ``"referenced_in_script"`` when the script references every required
-    header. A missing header refuses only when lexical inspection finds a
-    literal request form for a declared authorization root. Unreadable, dynamic, offline, and
-    literal out-of-scope scripts proceed with an honest unknown/not-applicable
-    status because this check is attribution, not an outbound firewall.
+    wafw00f gets a headers file. A shell script FILE runs as an attributed copy
+    when its curl/wget can carry the headers. Other program text — a script file
+    or an inline ``-c``/``-e`` program — is read: one that references every
+    required header proceeds as ``referenced_in_script``, a literal request to a
+    declared target without them refuses, and the rest is classified
+    (``not_applicable_no_in_scope_url`` / ``unknown_dynamic_target``). A file
+    that cannot be read is ``unknown_script_unreadable``, and a run with no text
+    to read stays ``warned``; :func:`_require_attribution` decides those.
     """
-    script = interpreter_script_argv(cmd)
-    header_names = ", ".join(sorted(headers))
-    if not script:
-        repeat_note = (
-            " Not repeated for this tool for the rest of this run; each run's "
-            "audit row records required_header_status."
-            if run_notices.in_scope()
-            else ""
-        )
-        run_notices.emit_once(
-            f"required-headers-not-injected:{tool_name}:{header_names}",
-            "warning: program-required attribution headers could not be "
-            f"injected into tool '{tool_name}' ({header_names}); continuing.{repeat_note}",
-        )
-        return "warned"
     root = Path(engagement_dir).resolve()
+    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
+    script_head = os.path.basename(effective[0]).lower() if effective else ""
+    if script_head == "wafw00f" and tool_name.lower() == "wafw00f":
+        return _attribute_wafw00f(
+            cmd, root=root, headers=headers,
+            execution_cwd=execution_cwd, container_paths=container_paths,
+        )
+    script = interpreter_script_argv(cmd)
+    if not script:
+        inline = _inline_program(cmd)
+        if inline is None:
+            return "warned"
+        head, text = inline
+        status, missing = _program_attribution(
+            text, root, script_head=head, headers=headers
+        )
+        if status == "in_scope":
+            _refuse_unattributed_program("the inline program", missing)
+        if head in _SHELL_BINARIES and status != "referenced_in_script":
+            # A ``-c`` body that runs a program of its own (``python3 login.py``)
+            # is held to the same check as running that program directly.
+            # Its file is checked as written; the body is not rewritten to run
+            # an attributed copy, so a shell script there must carry the headers.
+            nested, _ambiguous = _simple_commands([head, "-c", text])
+            for words in nested:
+                if not (interpreter_script_argv(words) or "/" in words[0]):
+                    continue
+                nested_status = _verify_required_headers_in_script(
+                    words, engagement_dir=root, headers=headers,
+                    tool_name=os.path.basename(words[0]),
+                    execution_cwd=execution_cwd, container_paths=container_paths,
+                    attributed_copy=False,
+                )
+                if nested_status in _UNATTRIBUTED_HEADER_STATUSES:
+                    return nested_status
+        return status
     path = scope_lib.execution_script_path(
         script,
         root,
         execution_cwd=execution_cwd,
         container_paths=container_paths,
     )
-    readable = path is not None
+    text = None
     if path is not None:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            readable = False
-    if not readable:
-        print(
-            f"warning: script '{script}' is not readable beneath the engagement; "
-            "required-header applicability is unknown, so the attribution-only "
-            "gate is not claiming that it targets a declared authorization root.",
-            file=sys.stderr,
-        )
+            text = None
+    if path is None or text is None:
         return "unknown_script_unreadable"
-    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
-    script_head = os.path.basename(effective[0]).lower() if effective else ""
-    target_classification = _script_target_classification(
-        text, root, script_head=script_head
+    status, missing = _program_attribution(
+        text, root, script_head=script_head, headers=headers
     )
-    if target_classification != "in_scope":
-        return target_classification
-    missing = _script_references_required_headers(
-        text, headers, script_head=script_head
+    if (
+        attributed_copy
+        and script_head in _SHELL_BINARIES
+        and status in {"in_scope", "unknown_dynamic_target"}
+    ):
+        # A shell script that reaches a declared target, or builds its targets
+        # at run time, runs as a copy whose curl/wget carry the headers. One
+        # whose literal requests all leave the declaration is not rewritten, so
+        # the program handle never reaches a third party.
+        copied = _attributed_script_copy(cmd, script, path, text, headers)
+        if copied in {"injected", "noop"}:
+            return copied
+    if status == "in_scope":
+        _refuse_unattributed_program(f"the script '{script}'", missing)
+    return status
+
+
+# Outcomes where the run's requests would leave without the required headers.
+_UNATTRIBUTED_HEADER_STATUSES = frozenset(
+    {"warned", "unknown_dynamic_target", "unknown_script_unreadable"}
+)
+_NO_TARGET_REQUESTS_FLAG = "--no-target-requests"
+
+
+def _recognized_target(cmd: list[str], tool_name: str) -> str:
+    """The first target the argv itself names (a request URL), or a target-facing tool."""
+    urls = scope_lib._request_urls([str(token) for token in cmd])
+    if urls:
+        return urls[0]
+    observed, _ambiguous = scope_lib._argv_tool_analysis([str(token) for token in cmd])
+    tools = sorted((set(observed) | {tool_name.lower()}) & scope_lib._TARGET_FACING_TOOLS)
+    return f"target-facing tool '{tools[0]}'" if tools else ""
+
+
+def _require_attribution(
+    status: str,
+    cmd: list[str],
+    *,
+    tool_name: str,
+    headers: dict[str, str],
+    no_target_requests: str,
+    report: dict | None,
+) -> str:
+    """Refuse a run whose requests cannot carry the required headers.
+
+    ``no_target_requests`` is the caller's statement that the run sends no
+    request to a declared target; it is recorded on the audit row and refused
+    when the argv itself names a target.
+    """
+    if status not in _UNATTRIBUTED_HEADER_STATUSES:
+        return status
+    names = ", ".join(sorted(headers))
+    reason = str(no_target_requests or "").strip()
+    if reason:
+        target = _recognized_target(cmd, tool_name)
+        if target:
+            raise scope_lib.ScopePolicyError(
+                f"{_NO_TARGET_REQUESTS_FLAG} says this run sends no request to a "
+                f"declared target, but its argv names {target}; the program requires "
+                f"{names} on every request. Send it with a tool Vigil injects the "
+                "headers into (curl, httpx, nuclei, ffuf, whatweb, ...)."
+            )
+        if report is not None:
+            report["no_target_requests_reason"] = reason
+        return "declared_no_target_requests"
+    why = {
+        "warned": (
+            f"tool '{tool_name}' has no header option Vigil can fill and no program "
+            "text Vigil can read"
+        ),
+        "unknown_dynamic_target": (
+            "the program builds its request targets at run time, so Vigil cannot "
+            "tell whether they reach a declared target, and it never references the headers"
+        ),
+        "unknown_script_unreadable": (
+            "the script it runs is not readable beneath the engagement, so Vigil "
+            "cannot check its requests"
+        ),
+    }[status]
+    raise scope_lib.ScopePolicyError(
+        f"the program requires attribution header(s) {names} on every request, and "
+        f"this run cannot be shown to carry them: {why}. Send target requests with "
+        "curl/wget or a kali verb that takes -H (Vigil injects them), or add the "
+        f"headers to each request in a script stored under the engagement (they are "
+        f"exported as ${_REQUIRED_HEADER_ENV_ALL} and ${_REQUIRED_HEADER_ENV_PREFIX}<NAME>). "
+        "If this run sends no request to a declared target, re-run it with "
+        f"{_NO_TARGET_REQUESTS_FLAG} '<why>'; the audit row records that statement."
     )
-    if missing:
-        raise scope_lib.ScopePolicyError(
-            f"the script '{script}' never references the program-required "
-            f"attribution header(s) {', '.join(sorted(missing))}, while it contains "
-            "a literal request form for a declared target. ROE makes attribution "
-            "mandatory on every request. Add the headers to each request in the "
-            f"script (the values are exported as ${_REQUIRED_HEADER_ENV_ALL} and "
-            f"${_REQUIRED_HEADER_ENV_PREFIX}<NAME> for this run), or inline the "
-            "requests as `bash -c '<the curl commands>'` where Vigil injects them."
-        )
-    return "referenced_in_script"
 
 
 def prepare_execution_command(
@@ -1669,6 +1970,7 @@ def prepare_execution_command(
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
     identity_probe: bool = False,
+    no_target_requests: str = "",
     report: dict | None = None,
 ) -> str:
     """Apply shared identity, attribution, and OOB preparation for sync/jobs.
@@ -1718,6 +2020,14 @@ def prepare_execution_command(
                 execution_cwd=execution_cwd,
                 container_paths=container_paths,
             )
+        header_status = _require_attribution(
+            header_status,
+            cmd,
+            tool_name=tool_name,
+            headers=required,
+            no_target_requests=no_target_requests,
+            report=report,
+        )
     if report is not None:
         report["required_header_status"] = header_status
     if identity is not None:
@@ -1894,6 +2204,7 @@ def kali_exec(
     identity_probe: bool = False,
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
+    no_target_requests: str = "",
 ) -> KaliResult:
     """Run `cmd` inside the runtime container with full audit recording.
 
@@ -1980,6 +2291,7 @@ def kali_exec(
             nuclei_oob_explicit=nuclei_oob_explicit,
             prepared_auth_context=prepared_auth_context,
             identity_probe=identity_probe,
+            no_target_requests=no_target_requests,
             report=prepare_report,
         )
         # The row must name EVERY identity the run carried, or a two-identity
