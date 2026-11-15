@@ -1032,6 +1032,54 @@ def _standing_review_row(connection, engagement_id: int, file_id: int) -> dict[s
     return None if row is None else dict(row)
 
 
+def _review_suspended_by_pending_requeue(
+    connection, engagement_id: int, file_id: int
+) -> dict[str, Any] | None:
+    """The successful review a pending directed attempt suspended, else None.
+
+    A directed (`trigger`) attempt makes the file's latest attempt a pending
+    one, so no review stands; the review right before it still holds the
+    effort the attempt was queued to raise. Only an unbroken history counts:
+    the pending attempt is the file's latest current attempt and its
+    predecessor is a current successful review.
+    """
+    attempts = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT queue.*
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files
+              ON files.id = queue.file_id AND files.engagement_id = queue.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+            WHERE queue.engagement_id = ? AND queue.file_id = ?
+              AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
+            ORDER BY queue.id
+            """,
+            (engagement_id, file_id),
+        ).fetchall()
+    ]
+    latest, _active, issue = _canonical_queue_attempt_state(attempts)
+    if (
+        issue is not None or latest is None or len(attempts) < 2
+        or str(latest["status"]) != "pending"
+        or str(latest.get("queue_mode") or "") != "trigger"
+    ):
+        return None
+    predecessor = attempts[-2]
+    stands = connection.execute(
+        f"""
+        SELECT 1 FROM code_analysis_queue AS queue
+        WHERE queue.engagement_id = ? AND queue.id = ?
+          AND ({_successful_terminal_review_row_sql("queue")})
+        """,
+        (engagement_id, int(predecessor["id"])),
+    ).fetchone()
+    return predecessor if stands is not None else None
+
+
 def _skip_closeout_refused_by_tier(
     connection, engagement_id: int, file_id: int, classification: str
 ) -> bool:
@@ -1174,7 +1222,8 @@ def _apply_obligation_change(
     change stops requiring is superseded and stays readable:
     `family_no_longer_required` when its family is no longer required,
     `tier_floor_lowered` when the new tier owes no floor or the review on
-    record meets the lower one. A directed attempt left carrying none of its
+    record meets the lower one (under a pending directed attempt, the review
+    it suspended). A directed attempt left carrying none of its
     triggers is withdrawn when `withdraw` would take it back
     (`_withdraw_emptied_requeues`) and named otherwise. A reviewer's
     cross-file hypothesis is never touched. Returns the change report, or None
@@ -1221,13 +1270,18 @@ def _apply_obligation_change(
         retire(_live_floor_triggers(connection, engagement_id, file_id), _TIER_FLOOR_LOWERED_REASON)
     elif (
         tier_changed
-        and review is not None
         and tier_before in _CLOSEOUT_FAMILY_TIERS
         and EFFORT_THRESHOLDS[tier_after] < EFFORT_THRESHOLDS[tier_before]
+        and (
+            measured := review
+            or _review_suspended_by_pending_requeue(connection, engagement_id, file_id)
+        ) is not None
     ):
+        # A pending directed attempt leaves no review standing; the lower floor
+        # is measured against the review it suspended.
         short, _evaluated, _threshold = _depth_floor_shortfalls(
-            connection, engagement_id, file_row=after, queue_row=review,
-            cwe_coverage=_json_decode(review["cwe_coverage_json"], []),
+            connection, engagement_id, file_row=after, queue_row=measured,
+            cwe_coverage=_json_decode(measured["cwe_coverage_json"], []),
             allow_processing=False, families=required_after,
         )
         still_short = {family for family, _effort in short}
@@ -7474,23 +7528,25 @@ def _withdraw_directed_attempt(
 ) -> dict[str, Any]:
     """Delete one unclaimed directed attempt `_withdraw_refusal` cleared.
 
-    Each trigger it carried as `queued` returns to `pending` with a note naming
-    the withdrawal; the returned record is what the audit event keeps of the
-    row the queue no longer holds.
+    Each live trigger it carried as `queued` returns to `pending` with a note
+    naming the withdrawal. A trigger it carried that is already superseded (a
+    reclassification retired it) keeps its status, note and supersession; the
+    deleted row's link to it is the only thing that goes, so the record names
+    it under `retired_trigger_ids`. The returned record is what the audit event
+    keeps of the row the queue no longer holds.
     """
     item_id = int(row["id"])
     file_id = int(row["file_id"])
-    returned = [
-        int(trigger["id"])
-        for trigger in connection.execute(
-            """
-            SELECT id FROM code_analysis_triggers
-            WHERE engagement_id = ? AND resolved_queue_item_id = ? AND status = ?
-            ORDER BY id
-            """,
-            (engagement_id, item_id, _TRIGGER_STATUS_QUEUED),
-        ).fetchall()
-    ]
+    carried = connection.execute(
+        """
+        SELECT id, source_superseded_at FROM code_analysis_triggers
+        WHERE engagement_id = ? AND resolved_queue_item_id = ? AND status = ?
+        ORDER BY id
+        """,
+        (engagement_id, item_id, _TRIGGER_STATUS_QUEUED),
+    ).fetchall()
+    returned = [int(trigger["id"]) for trigger in carried if trigger["source_superseded_at"] is None]
+    retired = [int(trigger["id"]) for trigger in carried if trigger["source_superseded_at"] is not None]
     note = f"Withdrawn from directed queue item {item_id} at {_now_iso()}: {note_reason}"
     if returned:
         connection.execute(
@@ -7534,6 +7590,7 @@ def _withdraw_directed_attempt(
         "predecessor_disposition": str(predecessor["disposition"] or ""),
         "file_analysis_status": str(analysis_status["analysis_status"] or ""),
         "returned_trigger_ids": returned,
+        "retired_trigger_ids": retired,
     }
 
 

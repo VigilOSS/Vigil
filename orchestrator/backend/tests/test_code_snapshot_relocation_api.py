@@ -132,18 +132,13 @@ def test_a_cloned_seal_bound_to_another_snapshot_is_a_conflict(
     assert client.get("/engagements/2026-11-15-acme-foreign-clone/assessment/code/repos").json() == []
 
 
-def test_a_moved_engagement_reads_its_repo_paths_under_its_own_root(
-    client, isolate_settings, request
-):
-    """The recorded paths stay readable; the read names this engagement's sealed copy."""
+def _move_seeded_engagement(client, isolate_settings, request, key: str):
+    """Seed one repository in *key*, then move the engagement to another root."""
     from app.config import settings
     from app.services.engagements import clear_list_engagements_cache
     from tests.test_code_analysis_api import _seed_repo
 
-    key = "2026-11-15-acme-moved-repo-paths"
     repo = _seed_repo(client, isolate_settings, key, "acme-moved-repo")
-    recorded_source, recorded_manifest = repo["repo_path"], repo["snapshot_manifest_path"]
-    tail = Path(recorded_source).parts[-3:]
     original_root = _engagement_root(key)
     moved_engagements = original_root.parent.parent / "moved-engagements"
     moved_engagements.mkdir()
@@ -157,6 +152,17 @@ def test_a_moved_engagement_reads_its_repo_paths_under_its_own_root(
     assert client.get("/engagements").status_code == 200
     moved_root = _engagement_root(key)
     assert moved_root == (moved_engagements / key).resolve()
+    return repo, moved_root
+
+
+def test_a_moved_engagement_reads_its_repo_paths_under_its_own_root(
+    client, isolate_settings, request
+):
+    """The recorded paths stay readable; the read names this engagement's sealed copy."""
+    key = "2026-11-15-acme-moved-repo-paths"
+    repo, moved_root = _move_seeded_engagement(client, isolate_settings, request, key)
+    recorded_source, recorded_manifest = repo["repo_path"], repo["snapshot_manifest_path"]
+    tail = Path(recorded_source).parts[-3:]
 
     base = f"/engagements/{key}/assessment/code"
     listed = client.get(f"{base}/repos").json()
@@ -173,3 +179,25 @@ def test_a_moved_engagement_reads_its_repo_paths_under_its_own_root(
             "SELECT repo_path FROM code_repos WHERE id = ?", (repo["id"],)
         ).fetchone()
     assert stored["repo_path"] == recorded_source
+
+
+def test_a_finding_location_under_the_moved_snapshot_is_stored_repo_relative(
+    client, isolate_settings, request
+):
+    """A location the author copied from the moved engagement's sealed source
+    names the same file as its repo-relative form, so both normalise alike."""
+    from app.services.state_manager.findings import _normalize_file_location
+
+    key = "2026-11-15-acme-moved-finding-location"
+    repo, moved_root = _move_seeded_engagement(client, isolate_settings, request, key)
+    tail = Path(str(repo["repo_path"])).parts[-3:]
+    moved_source = moved_root.joinpath(*_snapshots(Path()).parts, *tail)
+    with db_module.get_connection() as connection:
+        engagement_id = int(connection.execute(
+            "SELECT id FROM engagements WHERE key = ?", (key,),
+        ).fetchone()["id"])
+        normalised = _normalize_file_location(
+            connection, engagement_id, f"file:{moved_source}/src/parser.py:12",
+            repo_id=int(repo["id"]),
+        )
+    assert normalised == "file:src/parser.py:12"
