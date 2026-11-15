@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
+import psutil
+
 from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import (
     DEFAULT_READ_TIMEOUT_SECONDS,
@@ -140,14 +142,27 @@ _ACTION_HELP: dict[str, str] = {
     ),
     "heartbeat": (
         "Usage: vigil assess code-dispatch heartbeat "
-        "<item-id> <agent-id> <lease-token> [--keepalive [--every SECONDS]]\n\n"
+        "<item-id> <agent-id> <lease-token> [--keepalive [--every SECONDS] "
+        "[--owner-pid PID] [--max-lifetime SECONDS]]\n"
+        "       vigil assess code-dispatch heartbeat --keepalive --claims-file PATH "
+        "[--every SECONDS] [--owner-pid PID] [--max-lifetime SECONDS]\n\n"
         "Renew the exact active lease for one claimed queue item.\n"
         "--keepalive renews it every --every seconds (default 240, 30-599) until the "
         "backend refuses the lease: exit 0 when the item closed under this lease, 1 when "
         "the lease was reset, adopted or reclaimed, on any other refusal, or after 3 "
-        "consecutive transport/5xx failures. The lease is the only stop condition; run "
-        "one keepalive per lease in the background and never share a stop file. SIGINT "
-        "or SIGTERM stops it (exit 130/143) and leaves the lease held.\n"
+        "consecutive transport/5xx failures. The lease is the only stop condition; "
+        "never share a stop file. SIGINT or SIGTERM stops it (exit 130/143) and leaves "
+        "the lease held.\n"
+        "--keepalive --claims-file PATH renews every lease in a `code-dispatch fetch` "
+        "output (or its audit snapshot) from one background process per lane. Each "
+        "lease stops on its own answer; the process runs while any lease is live and "
+        "exits 0 only when every item closed under its lease.\n"
+        "A keepalive also ends with its owner (exit 1, leases left to go stale for "
+        "reset-stale or adopt-lease): when the --owner-pid process exits (pass $PPID "
+        "from the lane's shell; without it the owner is derived from the process tree "
+        "when it can be), when the dispatch named by the lease's agent-id is no longer "
+        "in_progress, or after --max-lifetime seconds (default 14400, 60-86400). It "
+        "names what it watches on start.\n"
     ),
     "done": (
         "Usage: vigil assess code-dispatch done <item-id> <agent-id> "
@@ -399,18 +414,49 @@ def run(args) -> None:
             dry_run=dry_run, skip_reason=skip_reason,
         )
     elif action == "heartbeat":
-        if len(extra) < 3:
-            print(
-                "Usage: code-dispatch heartbeat <item-id> <agent-id> <lease-token> "
-                "[--keepalive [--every SECONDS]]",
-                file=sys.stderr,
+        usage = (
+            "Usage: code-dispatch heartbeat <item-id> <agent-id> <lease-token> "
+            "[--keepalive [--every SECONDS] [--owner-pid PID] [--max-lifetime SECONDS]]\n"
+            "       code-dispatch heartbeat --keepalive --claims-file PATH [--every SECONDS] "
+            "[--owner-pid PID] [--max-lifetime SECONDS]"
+        )
+        if "--claims-file" in extra:
+            index = extra.index("--claims-file")
+            if index + 1 >= len(extra) or "--claims-file" in extra[index + 1:]:
+                print(f"ERROR: --claims-file takes one fetch JSON path\n{usage}", file=sys.stderr)
+                sys.exit(1)
+            claims_path = extra[index + 1]
+            options = [*extra[:index], *extra[index + 2:]]
+            if options and not options[0].startswith("--"):
+                print(
+                    "ERROR: --claims-file names the leases itself; drop the "
+                    f"<item-id> <agent-id> <lease-token> positionals\n{usage}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            keepalive = _parse_keepalive_options(options)
+            if keepalive is None:
+                print(
+                    "ERROR: --claims-file only applies with --keepalive; renew one lease "
+                    f"once with the positional form\n{usage}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            _keepalive(
+                cfg, _claim_leases(resolve_input_path(claims_path, cfg.engagement_dir)),
+                keepalive,
             )
+            return
+        if len(extra) < 3:
+            print(usage, file=sys.stderr)
             sys.exit(1)
-        every = _parse_keepalive_options(extra[3:])
-        if every is None:
+        keepalive = _parse_keepalive_options(extra[3:])
+        if keepalive is None:
             _heartbeat(cfg, extra[0], extra[1], extra[2])
         else:
-            _keepalive(cfg, extra[0], extra[1], extra[2], every=every)
+            _keepalive(
+                cfg, [(_validate_single_id(extra[0]), extra[1], extra[2])], keepalive
+            )
     elif action == "error":
         if len(extra) < 3:
             print("Usage: code-dispatch error <item-id> <agent-id> <lease-token> [notes]", file=sys.stderr)
@@ -1895,39 +1941,140 @@ _MAX_KEEPALIVE_SECONDS = 599
 _MAX_TRANSIENT_HEARTBEAT_FAILURES = 3
 
 
-def _parse_keepalive_options(tokens: list[str]) -> int | None:
-    """``--keepalive [--every SECONDS]`` -> the interval, or None for one heartbeat."""
+_DEFAULT_KEEPALIVE_LIFETIME_SECONDS = 4 * 60 * 60
+_MIN_KEEPALIVE_LIFETIME_SECONDS = 60
+_MAX_KEEPALIVE_LIFETIME_SECONDS = 24 * 60 * 60
+
+
+class _KeepaliveOptions(NamedTuple):
+    every: int
+    owner_pid: int | None
+    max_lifetime: int
+
+
+def _parse_keepalive_options(tokens: list[str]) -> _KeepaliveOptions | None:
+    """``--keepalive [--every S] [--owner-pid PID] [--max-lifetime S]``, or None for one beat."""
     keepalive = False
-    every: int | None = None
+    values: dict[str, int] = {}
+    bounds = {
+        "--every": (
+            _MIN_KEEPALIVE_SECONDS, _MAX_KEEPALIVE_SECONDS,
+            "seconds (the lease goes stale after 10 minutes without a heartbeat)",
+        ),
+        "--owner-pid": (1, 2**31 - 1, "(a live process id)"),
+        "--max-lifetime": (
+            _MIN_KEEPALIVE_LIFETIME_SECONDS, _MAX_KEEPALIVE_LIFETIME_SECONDS, "seconds",
+        ),
+    }
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if token == "--keepalive" and not keepalive:
             keepalive = True
             index += 1
-        elif token == "--every" and every is None and index + 1 < len(tokens):
+        elif token in bounds and token not in values and index + 1 < len(tokens):
             value = tokens[index + 1]
-            if re.fullmatch(r"[0-9]+", value) is None or not (
-                _MIN_KEEPALIVE_SECONDS <= int(value) <= _MAX_KEEPALIVE_SECONDS
-            ):
+            low, high, unit = bounds[token]
+            if re.fullmatch(r"[0-9]+", value) is None or not (low <= int(value) <= high):
                 print(
-                    f"ERROR: --every requires an integer between {_MIN_KEEPALIVE_SECONDS} "
-                    f"and {_MAX_KEEPALIVE_SECONDS} seconds (the lease goes stale after 10 "
-                    "minutes without a heartbeat)",
+                    f"ERROR: {token} requires an integer between {low} and {high} {unit}",
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
-            every = int(value)
+            values[token] = int(value)
             index += 2
         else:
             print(f"Unknown, repeated or incomplete code-dispatch heartbeat option: {token}", file=sys.stderr)
             raise SystemExit(1)
-    if every is not None and not keepalive:
-        print("ERROR: --every only applies with --keepalive", file=sys.stderr)
+    if values and not keepalive:
+        print(
+            f"ERROR: {', '.join(values)} only applies with --keepalive", file=sys.stderr
+        )
         raise SystemExit(1)
     if not keepalive:
         return None
-    return every if every is not None else _DEFAULT_KEEPALIVE_SECONDS
+    return _KeepaliveOptions(
+        every=values.get("--every", _DEFAULT_KEEPALIVE_SECONDS),
+        owner_pid=values.get("--owner-pid"),
+        max_lifetime=values.get("--max-lifetime", _DEFAULT_KEEPALIVE_LIFETIME_SECONDS),
+    )
+
+
+class _KeepaliveOwner(NamedTuple):
+    pid: int
+    identity: float
+    label: str
+
+
+# The processes between a shell command and this interpreter: the `vigil`
+# helper execs `uv`, which runs Python, and a backgrounded command may sit
+# under `nohup` or `env`. A shell is the command's own, and exits with it.
+_KEEPALIVE_LAUNCHER_NAMES = frozenset(
+    {"uv", "uvx", "vigil", "nohup", "env", "timeout", "gtimeout", "setsid", "stdbuf", "nice"}
+)
+_KEEPALIVE_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh"})
+
+
+def _process_label(process: psutil.Process) -> str:
+    try:
+        return process.name()
+    except (psutil.Error, OSError):
+        return "unknown"
+
+
+def _keepalive_owner(explicit_pid: int | None) -> _KeepaliveOwner | None:
+    """The process whose exit ends this keepalive.
+
+    ``--owner-pid`` names it; pass the client that runs the lane (``$PPID`` in
+    the shell command that starts the keepalive). Without it, the owner is the
+    first ancestor above the launcher processes and the command's own shells,
+    which is the client when that shell is still running; a backgrounded
+    command whose shell already exited has no derivable owner.
+    """
+    if explicit_pid is not None:
+        try:
+            process = psutil.Process(explicit_pid)
+            return _KeepaliveOwner(explicit_pid, process.create_time(), _process_label(process))
+        except (psutil.Error, OSError):
+            print(
+                f"ERROR: --owner-pid {explicit_pid} is not a running process",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
+    try:
+        ancestors = psutil.Process().parents()
+    except (psutil.Error, OSError):
+        return None
+    names = [
+        _process_label(process).lower().lstrip("-").rsplit("/", 1)[-1]
+        for process in ancestors
+    ]
+    index = 0
+    while index < len(ancestors) and (
+        names[index] in _KEEPALIVE_LAUNCHER_NAMES or names[index].startswith("python")
+    ):
+        index += 1
+    while index < len(ancestors) and names[index] in _KEEPALIVE_SHELL_NAMES:
+        index += 1
+    if index >= len(ancestors) or ancestors[index].pid <= 1:
+        return None
+    process = ancestors[index]
+    try:
+        return _KeepaliveOwner(process.pid, process.create_time(), _process_label(process))
+    except (psutil.Error, OSError):
+        return None
+
+
+def _owner_alive(owner: _KeepaliveOwner) -> bool:
+    """Whether the owner still runs: the same pid with the same start time."""
+    try:
+        process = psutil.Process(owner.pid)
+        return (
+            process.create_time() == owner.identity
+            and process.status() != psutil.STATUS_ZOMBIE
+        )
+    except (psutil.Error, OSError):
+        return False
 
 
 class _KeepaliveSignal(Exception):
@@ -1994,75 +2141,251 @@ def _keepalive_outcome(
     return 1
 
 
-def _keepalive(cfg, item_id: str, agent_name: str, lease_token: str, *, every: int) -> None:
-    """Heartbeat one lease every *every* seconds until the backend ends it.
+def _claim_leases(path_value: str) -> list[tuple[int, str, str]]:
+    """Every lease a fetch claim names: ``(queue_item_id, agent_name, lease_token)``.
 
-    The lease is the only stop condition: a closed item exits 0, a lease that was
-    reset, adopted or reclaimed exits 1, and so does a refusal the item's progress
-    cannot explain or three transport/5xx failures in a row. SIGINT and SIGTERM
-    stop the loop without touching the lease.
+    The file is `code-dispatch fetch` stdout or its audit snapshot (one JSON
+    array of claimed items). Every entry that lacks an identity is named at once,
+    before any heartbeat is sent.
     """
-    item_id_value = _validate_single_id(item_id)
-    payload = {'item_id': item_id_value, 'agent_name': agent_name, 'lease_token': lease_token}
+    path = Path(path_value)
+    if not path.is_file():
+        print(f"Claims file not found: {path_value}", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        print(f"Claims file {path_value} is not a readable JSON array: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    if not isinstance(rows, list) or not rows:
+        print(
+            f"Claims file {path_value} must hold the non-empty JSON array "
+            "`code-dispatch fetch` prints",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    leases: list[tuple[int, str, str]] = []
+    problems: list[str] = []
+    seen: set[int] = set()
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            problems.append(f"entry {position} is not a claimed item object")
+            continue
+        item_id = row.get("queue_item_id", row.get("id"))
+        missing = [
+            name
+            for name, value in (
+                ("queue_item_id", item_id),
+                ("agent_name", row.get("agent_name")),
+                ("lease_token", row.get("lease_token")),
+            )
+            if not (type(value) is int and value > 0 if name == "queue_item_id"
+                    else isinstance(value, str) and value)
+        ]
+        if missing:
+            problems.append(f"entry {position} lacks {', '.join(missing)}")
+            continue
+        if item_id in seen:
+            problems.append(f"entry {position} repeats queue item {item_id}")
+            continue
+        seen.add(item_id)
+        leases.append((int(item_id), str(row["agent_name"]), str(row["lease_token"])))
+    if problems:
+        print(
+            f"Claims file {path_value} cannot name every lease: " + "; ".join(problems),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return leases
+
+
+def _dispatch_status(client, agent_name: str) -> str | None:
+    """The dispatch row's status, '' when no dispatch has that agent_id, None if unread."""
+    try:
+        row = client.get(f"dispatches/{agent_name}")
+    except AssessError as exc:
+        return "" if str(exc).startswith("HTTP 404") else None
+    return str(row.get("status") or "") if isinstance(row, dict) else None
+
+
+def _keepalive_watch_ended(
+    client,
+    *,
+    owner: _KeepaliveOwner | None,
+    dispatches: set[str],
+    deadline: float,
+    max_lifetime: int,
+) -> str:
+    """Why this keepalive's owner is gone, or '' while every watch still holds."""
+    if time.monotonic() >= deadline:
+        return f"it reached its maximum lifetime of {max_lifetime}s"
+    if owner is not None and not _owner_alive(owner):
+        return f"its owner pid {owner.pid} ({owner.label}) ended"
+    for agent_name in sorted(dispatches):
+        status = _dispatch_status(client, agent_name)
+        if status and status != "in_progress":
+            return f"dispatch {agent_name} is {status}"
+    return ""
+
+
+def _keepalive(cfg, leases: list[tuple[int, str, str]], options: _KeepaliveOptions) -> None:
+    """Heartbeat each lease every ``options.every`` seconds until it, or its owner, ends.
+
+    One process renews a whole lane. Each lease's own stop condition is the
+    backend's answer about that lease: a closed item ends it with 0, a lease
+    that was reset, adopted or reclaimed ends it with 1, and so does a refusal
+    the item's progress cannot explain or three transport/5xx failures in a row.
+    The loop runs while any lease is live and exits 0 only when every item closed
+    under its lease.
+
+    The keepalive also ends with its owner, so a lane that dies never holds its
+    leases past the stale window: when the owner process exits, when the dispatch
+    the leases were fetched under is no longer in progress, or at the maximum
+    lifetime, it stops (exit 1) and the leases go stale for `reset-stale` or
+    `adopt-lease`. SIGINT and SIGTERM stop the loop without touching a lease.
+    """
+    every = options.every
+    live = list(leases)
+    failures = {item_id: 0 for item_id, _agent, _token in leases}
+    outcomes: dict[int, int] = {}
+    owner = _keepalive_owner(options.owner_pid)
+    deadline = time.monotonic() + options.max_lifetime
     previous_term = signal.signal(signal.SIGTERM, _raise_keepalive_signal)
-    failures = 0
+    if len(leases) == 1:
+        item_id, agent_name, _token = leases[0]
+        print(
+            f"code-dispatch heartbeat --keepalive: renewing queue item {item_id} for "
+            f"{agent_name} every {every}s until the item closes or the lease moves.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"code-dispatch heartbeat --keepalive: renewing {len(leases)} leases (queue "
+            f"items {', '.join(str(item_id) for item_id, _a, _t in leases)}) every {every}s "
+            "until each item closes or its lease moves.",
+            file=sys.stderr,
+        )
+    dispatches: set[str] = set()
+    watched: list[str] = []
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        for agent_name in sorted({agent for _item, agent, _token in leases}):
+            status = _dispatch_status(client, agent_name)
+            if status == "":
+                watched.append(f"no dispatch {agent_name} to watch")
+                continue
+            dispatches.add(agent_name)
+            watched.append(
+                f"dispatch {agent_name} ({status or 'status unread'}) while it is in_progress"
+            )
+    watched.insert(
+        0,
+        f"owner pid {owner.pid} ({owner.label})"
+        if owner is not None
+        else "no owner process (none derivable; pass --owner-pid $PPID from the "
+        "lane's shell to bind one)",
+    )
     print(
-        f"code-dispatch heartbeat --keepalive: renewing queue item {item_id_value} for "
-        f"{agent_name} every {every}s until the item closes or the lease moves.",
+        f"code-dispatch heartbeat --keepalive: watching {'; '.join(watched)}; runs at "
+        f"most {options.max_lifetime}s.",
         file=sys.stderr,
     )
+
+    def _end(lease: tuple[int, str, str], outcome: int) -> None:
+        outcomes[lease[0]] = outcome
+        live.remove(lease)
+
     try:
-        while True:
-            try:
-                with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-                    result = client.post('code/analysis-queue/heartbeat', payload)
-                failures = 0
-                beat_at = result.get("last_heartbeat_at") if isinstance(result, dict) else None
-                print(
-                    f"code-dispatch heartbeat --keepalive: queue item {item_id_value} alive "
-                    f"at {beat_at or 'an unreported time'}",
-                    file=sys.stderr,
+        while live:
+            with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+                ended = _keepalive_watch_ended(
+                    client, owner=owner, dispatches=dispatches, deadline=deadline,
+                    max_lifetime=options.max_lifetime,
                 )
-            except AssessError as exc:
-                transient = isinstance(exc, AssessTransportError) or str(exc).startswith("HTTP 5")
-                if not transient:
-                    if str(exc).startswith("HTTP 409"):
-                        raise SystemExit(
-                            _keepalive_outcome(cfg, item_id_value, agent_name, lease_token, exc)
-                        ) from None
+                if ended:
+                    held = ", ".join(str(item_id) for item_id, _a, _t in live)
                     print(
-                        f"code-dispatch heartbeat --keepalive: queue item {item_id_value} "
-                        f"refused the heartbeat: {_heartbeat_refusal_detail(exc)}; stopping.",
+                        f"code-dispatch heartbeat --keepalive: stopping because {ended}. "
+                        f"The leases on queue items {held} are no longer renewed and go "
+                        "stale after 10 minutes, for `code-dispatch reset-stale` or "
+                        "`adopt-lease`.",
                         file=sys.stderr,
                     )
-                    raise SystemExit(1) from None
-                failures += 1
-                if failures >= _MAX_TRANSIENT_HEARTBEAT_FAILURES:
+                    raise SystemExit(1)
+                for lease in list(live):
+                    item_id, agent_name, lease_token = lease
+                    try:
+                        result = client.post('code/analysis-queue/heartbeat', {
+                            'item_id': item_id, 'agent_name': agent_name,
+                            'lease_token': lease_token,
+                        })
+                    except AssessError as exc:
+                        transient = (
+                            isinstance(exc, AssessTransportError)
+                            or str(exc).startswith("HTTP 5")
+                        )
+                        if not transient:
+                            if str(exc).startswith("HTTP 409"):
+                                _end(lease, _keepalive_outcome(
+                                    cfg, item_id, agent_name, lease_token, exc
+                                ))
+                            else:
+                                print(
+                                    f"code-dispatch heartbeat --keepalive: queue item "
+                                    f"{item_id} refused the heartbeat: "
+                                    f"{_heartbeat_refusal_detail(exc)}; stopping.",
+                                    file=sys.stderr,
+                                )
+                                _end(lease, 1)
+                            continue
+                        failures[item_id] += 1
+                        if failures[item_id] >= _MAX_TRANSIENT_HEARTBEAT_FAILURES:
+                            print(
+                                f"code-dispatch heartbeat --keepalive: {failures[item_id]} "
+                                f"consecutive heartbeat failures for queue item {item_id} "
+                                f"(last: {exc}); stopping. Check the backend, then "
+                                f"`code-dispatch progress {item_id}` for the lease's state.",
+                                file=sys.stderr,
+                            )
+                            _end(lease, 1)
+                            continue
+                        print(
+                            f"WARN code-dispatch heartbeat --keepalive: heartbeat for queue "
+                            f"item {item_id} failed ({exc}); retrying in {every}s",
+                            file=sys.stderr,
+                        )
+                        continue
+                    failures[item_id] = 0
+                    beat_at = (
+                        result.get("last_heartbeat_at") if isinstance(result, dict) else None
+                    )
                     print(
-                        f"code-dispatch heartbeat --keepalive: {failures} consecutive "
-                        f"heartbeat failures for queue item {item_id_value} (last: {exc}); "
-                        "stopping. Check the backend, then `code-dispatch progress "
-                        f"{item_id_value}` for the lease's state.",
+                        f"code-dispatch heartbeat --keepalive: queue item {item_id} alive "
+                        f"at {beat_at or 'an unreported time'}",
                         file=sys.stderr,
                     )
-                    raise SystemExit(1) from None
-                print(
-                    f"WARN code-dispatch heartbeat --keepalive: heartbeat for queue item "
-                    f"{item_id_value} failed ({exc}); retrying in {every}s",
-                    file=sys.stderr,
-                )
-            time.sleep(every)
+            if live:
+                time.sleep(every)
     except (KeyboardInterrupt, _KeepaliveSignal) as exc:
         signum = exc.signum if isinstance(exc, _KeepaliveSignal) else signal.SIGINT
+        held = ", ".join(f"queue item {item_id} by {agent}" for item_id, agent, _t in live)
         print(
             f"code-dispatch heartbeat --keepalive: stopped by {signal.Signals(signum).name}; "
-            f"the lease stays held by {agent_name} until the item closes or the lease goes "
-            "stale.",
+            f"the lease stays held ({held}) until the item closes or the lease goes stale.",
             file=sys.stderr,
         )
         raise SystemExit(128 + int(signum)) from None
     finally:
         signal.signal(signal.SIGTERM, previous_term)
+    lost = [item_id for item_id, outcome in outcomes.items() if outcome != 0]
+    if len(leases) > 1:
+        closed = [item_id for item_id, outcome in outcomes.items() if outcome == 0]
+        print(
+            "code-dispatch heartbeat --keepalive: every lease ended; closed under this "
+            f"lane: {', '.join(map(str, closed)) or 'none'}; lost or refused: "
+            f"{', '.join(map(str, lost)) or 'none'}.",
+            file=sys.stderr,
+        )
+    raise SystemExit(1 if lost else 0)
 
 
 def _report_queue_write(result: object, snapshot: Path, count_line: str) -> None:

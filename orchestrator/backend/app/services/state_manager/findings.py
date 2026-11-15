@@ -43,7 +43,6 @@ from ._common import (
     _row_verification_status,
     _row_workflow_status,
     _serialize_finding_record,
-    _slugify,
     _stronger_severity,
 )
 from .cvss import CvssVectorError, base_score, versioned_vector
@@ -386,6 +385,79 @@ def _stripped_path_is_the_known_one(
 # A file of at most this many lines is one line of code (a minified bundle
 # behind a license comment): a line number inside it locates nothing.
 SINGLE_LINE_FILE_MAX_LOC = 3
+# Nor does a line of a file whose lines the structural index measured at this
+# many bytes on average: every line carries many statements, so a five-line,
+# twenty-megabyte webpack chunk is as line-unbound as a one-line one. Twice the
+# ingest's long-line mark, so a multi-thousand-line chunk of ordinary statements
+# keeps its line numbers.
+LINE_UNBOUND_AVERAGE_LINE_BYTES = 1024
+# The structured `details` keys that place a finding inside a file a line
+# cannot locate in, in the order a match is named.
+_IN_FILE_ANCHOR_KEYS = ("source_anchor", "function")
+
+
+def _file_location_is_line_bound(
+    connection: sqlite3.Connection, engagement_id: int, location: str
+) -> bool:
+    """Whether a line number in this ``file:`` location names one place in the file.
+
+    Not in a minified bundle: one at most ``SINGLE_LINE_FILE_MAX_LOC`` lines long,
+    or one whose structural index measured ``structural_source_size`` over the
+    sealed ``loc`` at ``LINE_UNBOUND_AVERAGE_LINE_BYTES`` or more. Only measured
+    copies of the path decide (a copy the index has not scanned says nothing
+    about its line shape), and every one of them must be line-unbound. A
+    location that is not ``file:``, or names no measured file, is line-bound, so
+    every guard keyed on the location keeps its full strength there.
+    """
+    if not location.startswith("file:"):
+        return True
+    rows = connection.execute(
+        """
+        SELECT files.loc AS loc, files.structural_source_size AS size
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+        WHERE files.engagement_id = ? AND files.file_path = ?
+          AND files.retired_at IS NULL AND repos.active_generation > 0
+        """,
+        (engagement_id, _file_path_only(location[len("file:"):])),
+    ).fetchall()
+    measured: list[bool] = []
+    for row in rows:
+        loc = int(row["loc"] or 0)
+        size = int(row["size"] or 0)
+        if loc <= SINGLE_LINE_FILE_MAX_LOC:
+            measured.append(True)
+        elif size > 0:
+            measured.append(size / loc >= LINE_UNBOUND_AVERAGE_LINE_BYTES)
+    return not (measured and all(measured))
+
+
+def _anchor_text(details: dict[str, Any], key: str) -> str:
+    return str(details.get(key, "") or "").strip()
+
+
+def _shared_in_file_anchor(mine: dict[str, Any], theirs: dict[str, Any]) -> str:
+    """The first anchor key both findings carry with an equal value, or ''."""
+    for key in _IN_FILE_ANCHOR_KEYS:
+        value = _anchor_text(mine, key)
+        if value and value == _anchor_text(theirs, key):
+            return key
+    return ""
+
+
+def _in_file_anchors_differ(mine: dict[str, Any], theirs: dict[str, Any]) -> bool:
+    """Whether both findings place themselves in the file, and nowhere alike.
+
+    Read only where a line locates nothing: two records there that carry an
+    anchor key in common, with no anchor equal, name two places in the file.
+    """
+    if _shared_in_file_anchor(mine, theirs):
+        return False
+    return any(
+        _anchor_text(mine, key) and _anchor_text(theirs, key)
+        for key in _IN_FILE_ANCHOR_KEYS
+    )
 
 
 def _duplicate_advisories(
@@ -411,34 +483,18 @@ def _duplicate_advisories(
     one defect independently — and the second lane's work belongs on the first
     finding as corroboration, with the operator folding the second row in.
     Merged and false_positive siblings are not live findings to fold into.
-    In a single-line file (a minified bundle) the line locates nothing, so a
-    location match counts only with an equal ``source_anchor`` or ``function``.
+    In a file whose lines locate nothing (a minified bundle,
+    ``_file_location_is_line_bound``), a location match counts only with an
+    equal ``source_anchor`` or ``function``.
     """
 
     entry_point = str(details.get("entry_point", "") or "").strip()
     parameter = str(details.get("parameter", "") or "").strip()
     root_key = str(root_cause_key or "").strip()
     location = str(canonical_location or "").strip()
-    anchor = str(details.get("source_anchor", "") or "").strip()
-    function = str(details.get("function", "") or "").strip()
-    location_is_line_bound = True
-    if location.startswith("file:"):
-        path = location[len("file:"):].rsplit(":", 1)[0]
-        file_row = connection.execute(
-            """
-            SELECT MAX(files.loc) AS loc
-            FROM code_files AS files
-            JOIN code_repos AS repos
-              ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
-            WHERE files.engagement_id = ? AND files.file_path = ?
-              AND files.retired_at IS NULL AND repos.active_generation > 0
-            """,
-            (engagement_id, path),
-        ).fetchone()
-        location_is_line_bound = not (
-            file_row is not None and file_row["loc"] is not None
-            and int(file_row["loc"]) <= SINGLE_LINE_FILE_MAX_LOC
-        )
+    location_is_line_bound = _file_location_is_line_bound(
+        connection, engagement_id, location
+    )
     rows = connection.execute(
         """
         SELECT slug, title, submission_status, submission_ref, canonical_location,
@@ -462,10 +518,8 @@ def _duplicate_advisories(
         if location and str(row["canonical_location"] or "").strip() == location:
             if location_is_line_bound:
                 reasons.append("canonical_location")
-            elif anchor and str(sibling_details.get("source_anchor", "") or "").strip() == anchor:
-                reasons.append("canonical_location+source_anchor")
-            elif function and str(sibling_details.get("function", "") or "").strip() == function:
-                reasons.append("canonical_location+function")
+            elif shared := _shared_in_file_anchor(details, sibling_details):
+                reasons.append(f"canonical_location+{shared}")
         if root_key and str(row["root_cause_key"] or "").strip() == root_key:
             reasons.append("root_cause_key")
         if (
@@ -519,6 +573,7 @@ def _find_killed_remint_collision(
     root_cause_key: str,
     auth_context: str,
     canonical_location: str,
+    details: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return a WITHDRAWN finding this net-new record would silently re-mint, or None.
 
@@ -534,6 +589,12 @@ def _find_killed_remint_collision(
     hold up. Without it here, a refuted finding fell back to ``unreviewed`` with no
     mark on it, which is indistinguishable from never having been looked at, so the
     next sweep re-filed the claim its own author had withdrawn.
+
+    In a file whose lines locate nothing (``_file_location_is_line_bound``) the
+    file is a whole bundle, so sharing it is no signal: there a withdrawn finding
+    matches on an equal ``source_anchor``/``function``, or on the exact tuple
+    unless the two anchors name different places. The returned row carries
+    ``remint_matched_on``, the signal that matched.
     """
     family = (defect_family or "").strip()
     if not family:
@@ -541,6 +602,10 @@ def _find_killed_remint_collision(
         # normal ``_semantic_finding_match`` path) is the only backstop here.
         return None
     new_endpoint = _canonical_location_endpoint(canonical_location)
+    line_bound = _file_location_is_line_bound(
+        connection, engagement_id, str(canonical_location or "").strip()
+    )
+    mine = details if isinstance(details, dict) else {}
     rows = connection.execute(
         """
         SELECT *
@@ -560,13 +625,29 @@ def _find_killed_remint_collision(
             and str(existing.get("auth_context") or "") == (auth_context or "")
             and str(existing.get("canonical_location") or "") == (canonical_location or "")
         )
-        if exact_tuple:
-            return existing
         existing_endpoint = _canonical_location_endpoint(
             str(existing.get("canonical_location") or "")
         )
-        if new_endpoint and existing_endpoint and new_endpoint == existing_endpoint:
-            return existing
+        same_endpoint = bool(
+            new_endpoint and existing_endpoint and new_endpoint == existing_endpoint
+        )
+        if line_bound:
+            if exact_tuple:
+                return {**existing, "remint_matched_on": "the exact dedup tuple"}
+            if same_endpoint:
+                return {**existing, "remint_matched_on": "the canonical-location endpoint"}
+            continue
+        if not same_endpoint:
+            continue
+        theirs = _json_object(existing.get("details_json"))
+        shared = _shared_in_file_anchor(mine, theirs)
+        if shared:
+            return {
+                **existing,
+                "remint_matched_on": f"an equal details.{shared} in the same file",
+            }
+        if exact_tuple and not _in_file_anchors_differ(mine, theirs):
+            return {**existing, "remint_matched_on": "the exact dedup tuple"}
     return None
 
 
@@ -575,9 +656,23 @@ def _raise_killed_remint_conflict(
     *,
     defect_family: str,
     canonical_location: str,
+    line_bound: bool = True,
 ) -> None:
     killed_slug = str(killed.get("slug", ""))
     killed_location = str(killed.get("canonical_location", ""))
+    matched_on = str(killed.get("remint_matched_on", "") or "")
+    # In a bundle a line cannot locate in, the guard matched on something finer
+    # than the file, and a distinct finding there says where it is instead.
+    where = (
+        ""
+        if line_bound
+        else (
+            " The file is a bundle a line number cannot locate in, so the guard "
+            "keys on details.source_anchor (the verbatim sink expression) or "
+            "details.function; a distinct defect there that carries its own "
+            "anchor is not held."
+        )
+    )
     # The two withdrawals have different recovery routes. A kill is a suppressed
     # workflow, so it is REOPENED. A dispute is a live finding whose claim was
     # withdrawn, so `--status draft` would say nothing about the dispute — the
@@ -602,8 +697,10 @@ def _raise_killed_remint_conflict(
             f"Refusing to re-mint withdrawn finding '{killed_slug}': it was {state} "
             f"for defect_family={defect_family!r} at canonical_location "
             f"{killed_location!r}, and this net-new record targets the SAME technique + "
-            f"endpoint at {canonical_location!r} under a different location/slug — minting it "
-            f"would silently resurrect a withdrawn finding as a fresh duplicate. {recovery} "
+            f"endpoint at {canonical_location!r} under a different location/slug"
+            + (f" (matched on {matched_on})" if matched_on else "")
+            + f" — minting it would silently resurrect a withdrawn finding as a fresh "
+            f"duplicate.{where} {recovery} "
             f"If this is a genuinely NEW finding that only coincidentally shares the "
             f"endpoint + technique, re-record with --allow-remint (a.k.a. --force) to override."
         ),
@@ -1558,25 +1655,17 @@ def _finding_slug(
     connection,
     engagement_id: int,
     slug: str | None,
-    title: str,
-    canonical_location: str,
     source_name: str,
 ) -> str:
     if slug:
         _require_canonical_finding_slug(slug, field="slug")
         return slug
-    prefix = _FINDING_PREFIX_BY_SOURCE.get(str(source_name or "").strip())
-    if not prefix:
-        base = _slugify(f"{title}-{canonical_location}")
-        candidate = base
-        suffix = 2
-        while connection.execute(
-            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-            (engagement_id, candidate),
-        ).fetchone():
-            candidate = f"{base}-{suffix}"
-            suffix += 1
-        return candidate
+    # A role with no prefix of its own (a reviewer, the report writer, a blue
+    # role) is credited to the operator's, so every minted slug is canonical and
+    # citable as a handoff finding_slug; source_name keeps the authoring role.
+    prefix = _FINDING_PREFIX_BY_SOURCE.get(
+        str(source_name or "").strip(), _FINDING_PREFIX_BY_SOURCE["operator"]
+    )
     rows = connection.execute(
         "SELECT slug FROM assessment_findings WHERE engagement_id = ? AND slug LIKE ?",
         (engagement_id, f"{prefix}-%"),
@@ -1608,6 +1697,7 @@ def _semantic_finding_match(
     canonical_location: str,
     auth_context: str,
     title: str,
+    details: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if slug:
         row = connection.execute(
@@ -1616,8 +1706,24 @@ def _semantic_finding_match(
         ).fetchone()
         if row is not None:
             return dict(row)
+    # Where a line locates nothing, one location is a whole bundle: a candidate
+    # whose in-file anchors name a different place is a different defect, and
+    # merging it would silently fold two findings into one.
+    line_bound = _file_location_is_line_bound(
+        connection, engagement_id, str(canonical_location or "").strip()
+    )
+    mine = details if isinstance(details, dict) else {}
+
+    def _first_same_place(rows: Any) -> dict[str, Any] | None:
+        for row in rows:
+            if line_bound or not _in_file_anchors_differ(
+                mine, _json_object(row["details_json"])
+            ):
+                return dict(row)
+        return None
+
     if defect_family and root_cause_key:
-        row = connection.execute(
+        match = _first_same_place(connection.execute(
             """
             SELECT *
             FROM assessment_findings
@@ -1628,13 +1734,12 @@ def _semantic_finding_match(
               AND auth_context = ?
               AND canonical_location = ?
             ORDER BY id ASC
-            LIMIT 1
             """,
             (engagement_id, defect_family, root_cause_key, auth_context, canonical_location),
-        ).fetchone()
-        if row is not None:
-            return dict(row)
-    row = connection.execute(
+        ))
+        if match is not None:
+            return match
+    return _first_same_place(connection.execute(
         (
             """
             SELECT *
@@ -1648,7 +1753,6 @@ def _semantic_finding_match(
             + (" AND defect_family = ?" if defect_family else "")
             + """
             ORDER BY CASE WHEN status = 'false_positive' THEN 0 ELSE 1 END, id ASC
-            LIMIT 1
             """
         ),
         (
@@ -1656,8 +1760,7 @@ def _semantic_finding_match(
             if defect_family
             else (engagement_id, title, canonical_location, auth_context)
         ),
-    ).fetchone()
-    return dict(row) if row is not None else None
+    ))
 
 
 # CVSS is a PAIR: the vector is the derivation and the score is its result. When
@@ -2130,6 +2233,7 @@ def create_finding(
             canonical_location=canonical_location,
             auth_context=auth_context,
             title=title,
+            details=details,
         )
         if (
             is_file_finding(canonical_location)
@@ -2266,12 +2370,16 @@ def create_finding(
                 root_cause_key=root_cause_key,
                 auth_context=auth_context,
                 canonical_location=canonical_location,
+                details=details,
             )
             if killed is not None:
                 _raise_killed_remint_conflict(
                     killed,
                     defect_family=defect_family,
                     canonical_location=canonical_location,
+                    line_bound=_file_location_is_line_bound(
+                        connection, engagement.id, canonical_location
+                    ),
                 )
         if existing is not None and isinstance(details, dict) and "repro_runs" in details:
             # The same runs in the other id spelling (5 vs "5") keep the stored
@@ -2415,7 +2523,7 @@ def create_finding(
             caller_supplied_slug = bool(slug)
             cursor = None
             for attempt in range(_SLUG_INSERT_MAX_ATTEMPTS):
-                resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location, source_name)
+                resolved_slug = _finding_slug(connection, engagement.id, slug, source_name)
                 try:
                     cursor = connection.execute(
                         """

@@ -207,9 +207,11 @@ verdict itself (`code-phase-3-verify-variant.md` "Operator-authority terminal ve
 - **Hand-back.** `code-dispatch release <item-id> <agent-id> <lease-token> --reason <why>` is the
   specialist-side hand-back for work a lane cannot review; it supersedes that attempt's receipts, so
   when `code-dispatch progress` shows receipts worth keeping, `adopt-lease` moves them instead.
-- **Ownership.** Each specialist keeps its lease alive with one background
-  `code-dispatch heartbeat ... --keepalive` per leased item, which stops on its own when the item
-  closes or the lease moves, and closes with its fetched `agent_name` + `lease_token`. `fetch` claims only currently-claimable rows, so reconcile a short claim before
+- **Ownership.** Each specialist keeps its leases alive with one background
+  `code-dispatch heartbeat --keepalive --claims-file <fetch-json> --owner-pid $PPID` per lane, where
+  each lease stops on its own when its item closes or the lease moves. The keepalive also stops when
+  its client exits, its dispatch is no longer in progress, or after four hours, so closing a dead
+  lane's dispatch lets its leases go stale for `reset-stale`/`adopt-lease`. Each lane closes with its fetched `agent_name` + `lease_token`. `fetch` claims only currently-claimable rows, so reconcile a short claim before
   dispatch (Phase 2 "Fetch loop"); an unreconciled id is owned by no lane.
 - **Prior-art leads.** Phase 1 binds them to files (`code-lead`). Each bound lead needs a terminal
   `lead_status` or an unbind before `complete`, whose `code_leads_unresolved` blocker refuses `--force`.

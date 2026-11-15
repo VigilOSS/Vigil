@@ -28,7 +28,7 @@ from assess.lib.client import (
     AssessmentClient,
     require_command_run_finalize_response,
 )
-from assess.lib.config import load_config
+from assess.lib.config import input_path, load_config
 from assess.lib.execution_recency import emit_foreign_lane_recency
 from assess.lib.kali import (
     _required_headers,
@@ -146,6 +146,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "--from-json",
         dest="from_json",
+        type=input_path,
         default=None,
         help="Read payload from JSON file instead of CLI flags; same field names.",
     )

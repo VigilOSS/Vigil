@@ -385,6 +385,11 @@ def test_a_partial_span_cannot_review_a_script_scope_file_without_callables(
     )
     assert partial.status_code == 409, partial.text
     assert "whole-file coverage" in partial.json()["detail"]
+    # The refusal names the one span that counts, so a lane need not read the
+    # structural index to learn the file's line count.
+    assert f"file_id {script['id']}" in partial.json()["detail"]
+    assert "lines 1-80" in partial.json()["detail"]
+    assert "got 1-1" in partial.json()["detail"]
 
     whole_file = client.post(
         f"{base}/analysis-results",

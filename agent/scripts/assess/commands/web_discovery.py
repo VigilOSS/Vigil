@@ -175,20 +175,14 @@ def _host_dispatch(cmd, *, intent, tool_name, timeout, engagement_dir):
     injectable/skip classifier kali_exec uses (``_apply_required_headers``), so a
     host-routed injectable tool (httpx) carries the engagement's required_headers
     while a skip-set tool (gau/dnsx/subfinder) never leaks the handle to an
-    archive/DNS endpoint. The host path does NOT inject IP-pins or auth material;
+    archive/DNS endpoint. host-exec's own preparation applies the same headers
+    again (idempotently) and carries them for a tool with no inline header flag,
+    or refuses the run. The host path does NOT inject IP-pins or auth material;
     only the attribution header is shared with the container path here."""
     cmd = list(cmd)
     _req_headers = _required_headers(Path(engagement_dir)) if engagement_dir else {}
     if _req_headers:
-        status = _apply_required_headers(cmd, tool_name, _req_headers)
-        if status == "warned":
-            names = ", ".join(_req_headers)
-            _warn(
-                f"program requires header(s) {names} but host-routed tool "
-                f"'{tool_name}' has no known -H injection — this run will NOT "
-                "carry the required header; inject it manually if it reaches the "
-                "in-scope target."
-            )
+        _apply_required_headers(cmd, tool_name, _req_headers)
     ns = SimpleNamespace(
         command=list(cmd), tool=tool_name, intent=intent, technique="DISCOVERY",
         phase="recon", target_host="", agent_name=None, scope_host="", cwd=None,

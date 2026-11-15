@@ -1987,6 +1987,53 @@ def test_grouped_analysis_receipt_rejects_unbound_or_inexact_source_anchors(
     assert accepted_close.status_code == 200, accepted_close.text
 
 
+def test_receipt_anchor_refusals_name_what_the_receipt_must_cite(
+    client, isolate_settings
+) -> None:
+    engagement_key = "2026-09-12-receipt-anchor-refusal-detail"
+    repo, files = _seed_repo_files(
+        client, isolate_settings, engagement_key, repo_key="receipt-anchor-detail-repo"
+    )
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    other = next(row for row in files if row["id"] != parser["id"])
+    parse = _structural_callable("parse", start_line=1, end_line=2)
+    _publish_structural_callables(
+        client, engagement_key, int(repo["id"]), files, {int(parser["id"]): [parse]}
+    )
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
+    endpoint = f"/engagements/{engagement_key}/assessment/code/analysis-results"
+    exact_ref = json.dumps({"file_id": parser["id"], **parse})
+
+    def _refusal(**receipt: object) -> str:
+        response = client.post(
+            endpoint,
+            json=_owned(
+                claim, queue_item_id=claim["id"], disposition="clean",
+                receipt_kind="file", evidence="Reviewed the parser.", **receipt,
+            ),
+        )
+        assert response.status_code in {400, 409}, response.text
+        return str(response.json()["detail"])
+
+    wrong_file = _refusal(
+        reviewed_spans=[{"file_id": other["id"], "start_line": 1, "end_line": 1}]
+    )
+    assert f"file_id {parser['id']}" in wrong_file
+    assert str(other["id"]) in wrong_file
+
+    overlap = _refusal(
+        reviewed_spans=[{"file_id": parser["id"], "start_line": 1, "end_line": 3}]
+    )
+    assert exact_ref in overlap
+    assert "lines 1-3" in overlap
+
+    inexact = _refusal(
+        callable_refs=[{"file_id": parser["id"], **parse, "end_line": 3}]
+    )
+    assert exact_ref in inexact
+
+
 def test_medium_clean_close_requires_current_source_receipt(client, isolate_settings):
     engagement_key = "2026-09-25-medium-clean-receipt"
     repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="medium-clean-receipt-repo")
@@ -7686,6 +7733,37 @@ def test_a_finding_receipt_takes_precedence_over_a_suspicious_receipt_at_close(
     )
     assert closed.status_code == 200, closed.text
     assert closed.json()["open_lead_receipts"] == [lead.json()["id"]]
+
+
+def test_a_receipt_citing_a_variant_is_told_its_root(client, isolate_settings):
+    engagement_key = "2026-08-05-code-receipt-variant-root"
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="variant-root-repo")
+    parser_file = next(
+        row for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["file_path"] == "src/parser.py"
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "high", 79)
+    _create_code_parent_finding(client, engagement_key, int(repo["id"]), slug="CH-048")
+    _create_code_parent_finding(
+        client, engagement_key, int(repo["id"]), slug="CH-039", line=20,
+        links=[{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "CH-048"}],
+    )
+    claim = _claim_file_for_analysis(
+        client, engagement_key, int(parser_file["id"]), agent_name="variant-root-agent"
+    )
+
+    refused = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim, queue_item_id=claim["id"], disposition="finding",
+            evidence="The parser copy repeats the root defect.", finding_slug="CH-039",
+        ),
+    )
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "CH-039 is a variant_of CH-048" in detail
+    assert '"finding_slug": "CH-048"' in detail
 
 
 def test_clean_closeout_requires_nonempty_review_notes(client, isolate_settings):

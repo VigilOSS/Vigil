@@ -345,20 +345,14 @@ def _host_dispatch(cmd, *, intent, tool_name, technique, phase, timeout, engagem
     Every dns-discovery host tool (dnsx/subfinder/puredns/...) is in the
     skip-set, so this is a silent no-op that correctly keeps the researcher
     handle off DNS/passive endpoints; the call is kept for parity with the
-    web-discovery host path and to future-proof an HTTP tool ever routed here.
+    web-discovery host path and to future-proof an HTTP tool ever routed here;
+    host-exec's own preparation carries the headers for such a tool or refuses
+    the run.
     """
     cmd = list(cmd)
     _req_headers = _required_headers(Path(engagement_dir)) if engagement_dir else {}
     if _req_headers:
-        status = _apply_required_headers(cmd, tool_name, _req_headers)
-        if status == "warned":
-            names = ", ".join(_req_headers)
-            _warn(
-                f"program requires header(s) {names} but host-routed tool "
-                f"'{tool_name}' has no known -H injection — this run will NOT "
-                "carry the required header; inject it manually if it reaches the "
-                "in-scope target."
-            )
+        _apply_required_headers(cmd, tool_name, _req_headers)
     ns = SimpleNamespace(
         command=list(cmd),
         tool=tool_name,

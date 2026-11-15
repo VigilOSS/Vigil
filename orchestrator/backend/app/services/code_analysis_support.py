@@ -483,6 +483,61 @@ def _normalize_variant_evidence_ref(engagement_root: str, evidence_ref: str) -> 
     return _normalize_relative_path(Path(engagement_root).resolve(), evidence_ref)
 
 
+def _variant_target(connection, engagement_id: int, finding_id: int) -> str | None:
+    """The finding a live ``variant_of`` link on *finding_id* names, or None."""
+    row = connection.execute(
+        """
+        SELECT target_ref
+        FROM assessment_finding_links
+        WHERE engagement_id = ? AND finding_id = ?
+          AND link_kind = 'variant_of' AND target_kind = 'finding' AND retired_at IS NULL
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (engagement_id, finding_id),
+    ).fetchone()
+    return None if row is None else str(row["target_ref"])
+
+
+def _variant_root_chain(
+    connection, engagement_id: int, finding: dict[str, Any]
+) -> tuple[str, str]:
+    """How a variant reaches its root, and the root's slug ('' when none survives).
+
+    Follows each ``variant_of`` link, and each merge into its surviving
+    finding, until a finding that is neither; a cycle or a missing target ends
+    the walk without a root.
+    """
+    steps: list[str] = []
+    current = finding
+    seen: set[int] = set()
+    while int(current["id"]) not in seen:
+        seen.add(int(current["id"]))
+        merged_into = current.get("merged_into_finding_id")
+        if merged_into is not None:
+            row = connection.execute(
+                "SELECT * FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+                (engagement_id, int(merged_into)),
+            ).fetchone()
+            if row is None:
+                return "; ".join(steps), ""
+            steps.append(f"{current['slug']} is merged into {row['slug']}")
+            current = dict(row)
+            continue
+        target = _variant_target(connection, engagement_id, int(current["id"]))
+        if target is None:
+            return "; ".join(steps), str(current["slug"])
+        steps.append(f"{current['slug']} is a variant_of {target}")
+        row = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, target),
+        ).fetchone()
+        if row is None:
+            return "; ".join(steps), ""
+        current = dict(row)
+    return "; ".join(steps) + " (a cycle)", ""
+
+
 def variant_input_identity_digest(
     *,
     repo: dict[str, Any],
@@ -857,20 +912,20 @@ def _require_reportable_root_file_finding(
         )
     # This associates a current, source-bound review receipt with the canonical
     # issue. It does not rebind that issue's provenance or verify its old proof.
-    variant_link = connection.execute(
-        """
-        SELECT 1
-        FROM assessment_finding_links
-        WHERE engagement_id = ? AND finding_id = ?
-          AND link_kind = 'variant_of' AND target_kind = 'finding' AND retired_at IS NULL
-        LIMIT 1
-        """,
-        (engagement_id, int(finding["id"])),
-    ).fetchone()
-    if variant_link is not None:
+    if _variant_target(connection, engagement_id, int(finding["id"])) is not None:
+        chain, root = _variant_root_chain(connection, engagement_id, finding)
+        cite = (
+            f"cite the root instead: \"finding_slug\": \"{root}\""
+            if root
+            else "no live root finding ends this chain; ask the operator to repair the "
+            "variant_of link before citing it"
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="finding_slug must reference a root file finding, not a variant finding",
+            detail=(
+                "finding_slug must reference a root file finding, not a variant finding: "
+                f"{chain}; {cite}"
+            ),
         )
 
     snapshot_status = finding_code_snapshot_status(connection, engagement_id, finding)
@@ -1230,20 +1285,40 @@ def _normalize_analysis_receipt_anchors(
             status_code=status.HTTP_409_CONFLICT,
             detail="grouped source receipt cannot cross repository snapshots",
         )
-    if receipt_kind == "file" and all_file_ids != {int(queue_file["id"])}:
+    claimed_file_id = int(queue_file["id"])
+    claimed_file = (
+        f"file_id {claimed_file_id} ({queue_file.get('file_path', '')}, "
+        f"queue item {int(queue_row['id'])})"
+    )
+    if receipt_kind == "file" and all_file_ids != {claimed_file_id}:
+        foreign = ", ".join(str(value) for value in sorted(all_file_ids - {claimed_file_id}))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="file receipt anchors must all belong to the claimed queue file",
+            detail=(
+                "file receipt anchors must all belong to the claimed queue file "
+                f"{claimed_file}; this receipt cites file_id {foreign}. Cite "
+                "other files along a chain with receipt_kind call_chain."
+            ),
         )
-    if int(queue_file["id"]) not in all_file_ids:
+    if claimed_file_id not in all_file_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="grouped source receipt must include the claimed queue file",
+            detail=(
+                f"grouped source receipt must include the claimed queue file {claimed_file}"
+            ),
         )
 
+    repo_generation = int(queue_row["repo_generation"])
+    source_manifest_digest = str(
+        connection.execute(
+            "SELECT source_manifest_digest FROM code_repos WHERE id = ?",
+            (repo_id,),
+        ).fetchone()[0]
+    )
     canonical_refs: list[dict[str, Any]] = []
     callable_ids: list[int] = []
     seen_callable_ids: set[int] = set()
+    unmatched_refs: list[str] = []
     for raw in callable_refs:
         _reject_unknown_fields(
             raw,
@@ -1268,13 +1343,8 @@ def _normalize_analysis_receipt_anchors(
             (
                 engagement_id,
                 repo_id,
-                int(queue_row["repo_generation"]),
-                str(
-                    connection.execute(
-                        "SELECT source_manifest_digest FROM code_repos WHERE id = ?",
-                        (repo_id,),
-                    ).fetchone()[0]
-                ),
+                repo_generation,
+                source_manifest_digest,
                 file_id,
                 str(file_rows[file_id]["file_hash"]),
                 raw.get("name"),
@@ -1284,10 +1354,17 @@ def _normalize_analysis_receipt_anchors(
             ),
         ).fetchone()
         if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="structural callable reference does not match the current structural index",
+            unmatched_refs.append(
+                _unmatched_callable_ref_problem(
+                    connection,
+                    engagement_id=engagement_id,
+                    repo_id=repo_id,
+                    repo_generation=repo_generation,
+                    file_row=file_rows[file_id],
+                    raw=raw,
+                )
             )
+            continue
         callable_id = int(row["id"])
         if callable_id in seen_callable_ids:
             raise HTTPException(
@@ -1307,6 +1384,14 @@ def _normalize_analysis_receipt_anchors(
                 "end_line": int(row["end_line"]),
             }
         )
+    if unmatched_refs:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"{len(unmatched_refs)} structural callable reference(s) do not match "
+                "the current structural index: " + " | ".join(unmatched_refs)
+            ),
+        )
 
     if reviewed_spans:
         callable_publication = connection.execute(
@@ -1315,7 +1400,7 @@ def _normalize_analysis_receipt_anchors(
             FROM code_structural_callable_publications
             WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
             """,
-            (engagement_id, repo_id, int(queue_row["repo_generation"])),
+            (engagement_id, repo_id, repo_generation),
         ).fetchone()
         if callable_publication is None:
             raise HTTPException(
@@ -1327,6 +1412,7 @@ def _normalize_analysis_receipt_anchors(
             )
     canonical_spans: list[dict[str, Any]] = []
     seen_spans: set[tuple[int, int, int, str]] = set()
+    span_problems: list[str] = []
     for raw in reviewed_spans:
         _reject_unknown_fields(
             raw,
@@ -1364,7 +1450,7 @@ def _normalize_analysis_receipt_anchors(
                 (
                     engagement_id,
                     repo_id,
-                    int(queue_row["repo_generation"]),
+                    repo_generation,
                     file_id,
                     TOP_LEVEL_CALLABLE_NAME,
                 ),
@@ -1381,12 +1467,20 @@ def _normalize_analysis_receipt_anchors(
                 if callable_id not in seen_callable_ids
             ),
         ).span_requirement(int(file_rows[file_id]["loc"]))
+        span_file = f"file_id {file_id} ({file_rows[file_id]['file_path']})"
         if requirement is not None and (
             start_line > requirement[0][0] or end_line < requirement[0][1]
         ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=requirement[1],
+            (first, last), reason = requirement
+            span_problems.append(
+                f"{reason}: {span_file} needs one reviewed span over lines "
+                f"{first}-{last}"
+                + (
+                    " (the file's sealed loc, `file.loc` on the claimed item)"
+                    if (first, last) == (1, int(file_rows[file_id]["loc"]))
+                    else ""
+                )
+                + f"; got {start_line}-{end_line}"
             )
         identity = (file_id, start_line, end_line, label)
         if identity in seen_spans:
@@ -1394,35 +1488,38 @@ def _normalize_analysis_receipt_anchors(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="reviewed spans must be unique within a receipt",
             )
-        overlapped_callable_ids = {
-            int(row["id"])
+        overlapped = [
+            row
             for row in connection.execute(
                 """
-                SELECT id
+                SELECT id, name, qualified_name, start_line, end_line
                 FROM code_structural_callables
                 WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
                   AND file_id = ? AND start_line <= ? AND end_line >= ?
                   AND name != ?
+                ORDER BY start_line, end_line, id
                 """,
                 (
                     engagement_id,
                     repo_id,
-                    int(queue_row["repo_generation"]),
+                    repo_generation,
                     file_id,
                     end_line,
                     start_line,
                     TOP_LEVEL_CALLABLE_NAME,
                 ),
             ).fetchall()
-        }
-        missing_callable_refs = overlapped_callable_ids - seen_callable_ids
-        if missing_callable_refs:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "reviewed span overlaps a registered structural callable; "
-                    "submit every overlapped callable as an exact callable_ref"
-                ),
+            if int(row["id"]) not in seen_callable_ids
+        ]
+        if overlapped:
+            span_problems.append(
+                f"reviewed span lines {start_line}-{end_line} of {span_file} overlaps "
+                f"{len(overlapped)} registered structural callable(s) this receipt does "
+                "not cite; submit each as an exact callable_ref, or narrow the span off "
+                "them: "
+                + _callable_ref_listing(
+                    overlapped, file_id=file_id, repo_id=repo_id
+                )
             )
         seen_spans.add(identity)
         canonical_spans.append(
@@ -1434,8 +1531,104 @@ def _normalize_analysis_receipt_anchors(
                 "label": label,
             }
         )
+    if span_problems:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=" | ".join(span_problems),
+        )
     binding_status = "structural" if canonical_refs else "source_span"
     return canonical_refs, callable_ids, canonical_spans, binding_status
+
+
+# A refusal lists this many callables; a minified bundle can register thousands.
+_REFUSAL_CALLABLE_LISTING_LIMIT = 20
+
+
+def _callable_ref_text(row: Any, *, file_id: int) -> str:
+    """The exact `callable_ref` object a receipt submits for *row*, as JSON."""
+    return json.dumps(
+        {
+            "file_id": file_id,
+            "name": str(row["name"]),
+            "qualified_name": str(row["qualified_name"]),
+            "start_line": int(row["start_line"]),
+            "end_line": int(row["end_line"]),
+        }
+    )
+
+
+def _structural_index_pointer(repo_id: int) -> str:
+    return (
+        "the repository's structural index (structural_index_manifest_path on "
+        f"`vigil assess fetch code/repos/{repo_id}`)"
+    )
+
+
+def _callable_ref_listing(rows: Sequence[Any], *, file_id: int, repo_id: int) -> str:
+    """Each row's exact callable_ref, capped, naming what the cap leaves out."""
+    listed = [
+        _callable_ref_text(row, file_id=file_id)
+        for row in rows[:_REFUSAL_CALLABLE_LISTING_LIMIT]
+    ]
+    omitted = len(rows) - len(listed)
+    if omitted > 0:
+        listed.append(
+            f"... {omitted} more not shown; every callable of file_id {file_id} is in "
+            f"{_structural_index_pointer(repo_id)}"
+        )
+    return "; ".join(listed)
+
+
+def _unmatched_callable_ref_problem(
+    connection,
+    *,
+    engagement_id: int,
+    repo_id: int,
+    repo_generation: int,
+    file_row: dict[str, Any],
+    raw: dict[str, Any],
+) -> str:
+    """Why one submitted callable_ref matches nothing, with the refs that would.
+
+    The candidates are the file's current callables sharing the submitted name
+    or qualified_name; failing those, the ones overlapping the submitted lines.
+    """
+    file_id = int(file_row["id"])
+    submitted = json.dumps(
+        {
+            key: raw.get(key)
+            for key in ("file_id", "name", "qualified_name", "start_line", "end_line")
+        }
+    )
+    columns = """
+        SELECT name, qualified_name, start_line, end_line
+        FROM code_structural_callables
+        WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+          AND file_id = ? AND file_sha256 = ?
+    """
+    scope = (engagement_id, repo_id, repo_generation, file_id, str(file_row["file_hash"]))
+    candidates = connection.execute(
+        columns + " AND (name = ? OR qualified_name = ?) ORDER BY start_line, id",
+        (*scope, raw.get("name"), raw.get("qualified_name")),
+    ).fetchall()
+    basis = "sharing its name or qualified_name"
+    start_line, end_line = raw.get("start_line"), raw.get("end_line")
+    if not candidates and type(start_line) is int and type(end_line) is int:
+        candidates = connection.execute(
+            columns + " AND start_line <= ? AND end_line >= ? ORDER BY start_line, id",
+            (*scope, end_line, start_line),
+        ).fetchall()
+        basis = f"overlapping lines {start_line}-{end_line}"
+    if not candidates:
+        return (
+            f"{submitted}: file_id {file_id} ({file_row['file_path']}) registers no "
+            "current callable by that name or over those lines; every callable of the "
+            f"file is in {_structural_index_pointer(repo_id)}"
+        )
+    return (
+        f"{submitted}: the current callables of file_id {file_id} {basis} are "
+        + _callable_ref_listing(candidates, file_id=file_id, repo_id=repo_id)
+    )
 
 
 def _analysis_result_row(connection, result_id: int) -> Any:

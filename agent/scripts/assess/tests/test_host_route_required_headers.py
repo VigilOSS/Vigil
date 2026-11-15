@@ -148,10 +148,13 @@ def test_dns_host_dispatch_skips_dnsx_header(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("warn_tool", ["wafw00f"])
-def test_host_routed_non_injectable_http_tool_warns(tmp_path, monkeypatch, capsys, warn_tool) -> None:
+def test_host_routed_non_injectable_http_tool_is_left_to_host_exec_attribution(
+    tmp_path, monkeypatch, warn_tool
+) -> None:
     # An HTTP-capable tool whose header flag can't carry an inline value (wafw00f's
-    # -H/--headers reads a FILE) WARNs (never blocks) and leaves argv untouched —
-    # same contract as the container path.
+    # -H/--headers reads a FILE) reaches host-exec with its argv untouched, and
+    # host-exec's shared preparation carries the header (here through a header
+    # file) or refuses the run.
     eng_dir = tmp_path / "eng"
     _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
@@ -165,7 +168,12 @@ def test_host_routed_non_injectable_http_tool_warns(tmp_path, monkeypatch, capsy
     )
 
     assert captured == [[warn_tool, "https://example.com"]]
-    assert "no known -H injection" in capsys.readouterr().err
+    report: dict[str, str] = {}
+    kali.prepare_execution_command(
+        list(captured[0]), tool_name=warn_tool, engagement_dir=eng_dir,
+        container_paths=False, report=report,
+    )
+    assert report["required_header_status"] == "injected"
 
 
 def test_host_routed_whatweb_carries_header_flag(tmp_path, monkeypatch) -> None:

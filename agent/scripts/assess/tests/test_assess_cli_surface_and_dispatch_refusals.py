@@ -34,7 +34,7 @@ from assess.lib.parser_boundary import MAX_DEFAULT_PARSER_JOBS
 # --------------------------------------------------------------------------- #
 
 _EXPECTED_LEAF_COUNT = 201
-_EXPECTED_TREE_DIGEST = "41cc46ec75b7d6b9d20bdc0e7a82d69c0a093bf57d418b96ae563fd81e92f264"
+_EXPECTED_TREE_DIGEST = "92ff2714728233ff40c7dbb5df800be8f2835d0ab27805dddb9db5bd68512768"
 
 
 def _stable(value: object) -> object:
@@ -148,7 +148,7 @@ _KALI_BESPOKE_VERBS = ("sweep-orphans", "sweep", "tool-help", "gf")
 _KALI_INLINE_VERBS = ("job", "exec", "browser")
 _EXPECTED_CONTRACT_NAME_COUNT = 154
 _EXPECTED_EPILOG_COUNT = 91
-_EXPECTED_CONTRACT_DIGEST = "1c8e4876cd67c49492ef2d2272b04514c9b669ebd76628a05a5aefee280fe7f3"
+_EXPECTED_CONTRACT_DIGEST = "7e20aad08e239541010fc0ccd2d9e82d14f019d76993ef29aacf1b8e102c0a98"
 
 
 def _renderable_contract_names() -> list[str]:

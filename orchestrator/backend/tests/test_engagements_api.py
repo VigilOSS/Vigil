@@ -1541,7 +1541,7 @@ def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_setti
     assert allocated.json()["finding"]["slug"] == "VA-1001"
 
 
-def test_finding_auto_slug_falls_back_for_unknown_source_name(client, isolate_settings):
+def test_finding_auto_slug_is_canonical_for_unknown_source_name(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
     created = client.post(
@@ -1552,13 +1552,13 @@ def test_finding_auto_slug_falls_back_for_unknown_source_name(client, isolate_se
             "workflow_status": "active",
             "verification_status": "unreviewed",
             "canonical_location": "https://example.com/unknown",
-            "summary": "Clients that omit source_name still get a backend slug.",
+            "summary": "Clients that omit source_name still get a canonical backend slug.",
             "evidence_ref": "findings.md",
             "provenance": _author_provenance(client, "unknown-source-finding"),
         },
     )
     assert created.status_code == 201, created.text
-    assert created.json()["finding"]["slug"] == "unknown-source-finding-https-example-com-unknown"
+    assert created.json()["finding"]["slug"] == "OP-001"
 
 
 def test_patch_finding_accepts_existing_database_legacy_slug(client, isolate_settings):

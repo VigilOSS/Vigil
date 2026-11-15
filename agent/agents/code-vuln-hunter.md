@@ -84,12 +84,15 @@ receipt fields, anchors, dispositions, and lease verbs. What to carry while you 
 
 - Every result, heartbeat, and closeout carries the fetched `queue_item_id`, `agent_name` (your
   Runtime Identity `agent_id`, never the role name), and `lease_token`. A reclaimed lease rejects
-  results and closeouts, so start one background
-  `vigil assess code-dispatch heartbeat <item-id> <agent-id> <lease-token> --keepalive` per leased
-  item right after fetch. It renews every 240 seconds and stops by itself when the item closes
-  under that lease (exit 0) or the lease moves (exit 1, naming the holder). Never write your own
-  heartbeat loop and never share a stop file: the lease is the only stop condition, so one lane can
-  never silence another's heartbeats.
+  results and closeouts, so save the fetch output and start one background
+  `vigil assess code-dispatch heartbeat --keepalive --claims-file <fetch-json> --owner-pid $PPID`
+  for the lane right after fetch. It renews every lease it names every 240 seconds; each lease stops
+  by itself when its item closes under that lease or the lease moves (naming the holder), and the
+  process exits 0 once every item closed under its lease, 1 if any lease moved. It also stops when
+  your client exits, when your dispatch closes, or after four hours, so a dead lane's leases go
+  stale for recovery. Never write your own heartbeat loop and
+  never share a stop file: each lease is its own stop condition, so one lane can never silence
+  another's heartbeats.
 - Use each item's own fetched token; never invent one or reuse another lease's. `code-dispatch
   progress <item-id>` or `code-dispatch list --show-tokens` prints the live holder; another
   `agent_name` there means the lease was reclaimed.

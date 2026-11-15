@@ -33,7 +33,7 @@ from assess.commands.dispatch.handoff_renderer import (
 from assess.lib.client import AssessError
 from assess.lib.code_record_input import fail
 from assess.lib.code_structural_identity import parse_code_file_page
-from assess.lib.config import _read_vigil_config_value
+from assess.lib.config import _read_vigil_config_value, input_path
 from assess.lib.vocabulary import word_folder
 from assess.lib.contracts import (
     BINDABLE_CLIENTS,
@@ -154,7 +154,7 @@ def register(subparsers) -> None:
         default=None,
         help="(start) Named identity this dispatch ran as (e.g. user_a / admin).",
     )
-    start.add_argument("--from-json", default=None)
+    start.add_argument("--from-json", type=input_path, default=None)
     start.add_argument(
         "--allow-duplicate",
         action="store_true",
@@ -180,6 +180,7 @@ def register(subparsers) -> None:
     )
     start.add_argument(
     "--prompt-context-json",
+        type=input_path,
         help=(
             "JSON object (inline or file) containing every canonical prompt-only "
             "dispatch field; omitted fields stay explicitly unknown. Optional lane_file selects a "
@@ -219,7 +220,9 @@ def register(subparsers) -> None:
         ),
     )
     swarm.add_argument("--batch-size", dest="swarm_batch_size", type=int, required=True)
-    swarm.add_argument("--items-file", dest="swarm_items_file", required=True)
+    swarm.add_argument(
+        "--items-file", dest="swarm_items_file", type=input_path, required=True
+    )
     swarm_traffic = swarm.add_mutually_exclusive_group()
     swarm_traffic.add_argument("--rate-budget")
     swarm_traffic.add_argument("--no-target-traffic", action="store_true")
@@ -300,7 +303,7 @@ def register(subparsers) -> None:
         "handoff", help="Create or update a handoff from JSON.", allow_abbrev=False
     )
     handoff.add_argument("--agent-id", required=True, help="Your dispatch agent_id; the payload's agent_id must match it.")
-    handoff.add_argument("--from-json", required=True)
+    handoff.add_argument("--from-json", type=input_path, required=True)
 
     render = actions.add_parser(
         "render-handoff", help="Render a bounded prior handoff.", allow_abbrev=False
@@ -359,7 +362,7 @@ def register(subparsers) -> None:
             + ". See `vigil assess contract agent decision`."
         ),
     )
-    decision.add_argument("--payload-json", default=None)
+    decision.add_argument("--payload-json", type=input_path, default=None)
     decision.add_argument("--surfaced-to-user", action="store_true")
     decision.add_argument("--host", dest="decision_host", default=None)
     decision.add_argument("--vendor", dest="decision_vendor", default=None)

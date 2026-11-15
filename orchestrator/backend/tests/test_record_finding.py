@@ -734,3 +734,17 @@ def test_cli_evidence_ref_shape_check_mirrors_the_backend_indexer():
     ]
     for ref in cases:
         assert rf._is_single_path_shaped(ref) is (_path_ref(ref) is not None), ref
+
+
+@pytest.mark.parametrize("source_name", ["report-writer", "blind-reviewer", "blue-analyst"])
+def test_a_role_without_a_slug_prefix_mints_a_canonical_operator_slug(
+    client, source_name, seeded_engagement
+):
+    # A handoff's finding_slugs accept canonical slugs only, so a role with no
+    # prefix of its own is credited to the operator's; source_name keeps the role.
+    payload = _finding(None)
+    payload["source_name"] = source_name
+    first = client.post(f"{_base()}/findings", json=payload)
+    assert first.status_code == 201, first.text
+    assert first.json()["finding"]["slug"] == "OP-001"
+    assert first.json()["finding"]["source_name"] == source_name
