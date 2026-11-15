@@ -117,8 +117,6 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   generated schema vocabulary. See: `orchestrator/backend/tests/test_cvss40.py`.
 - `orchestrator/backend/app/retry_state.py:RETRY_STATES` owns blocked-technique retries; unknown
   legacy prose becomes reviewable `pending`, never `no_retry`.
-- `agent/scripts/assess/lib/audit_enums.py` owns Kali technique and probe-kind enums. Host-side only;
-  never copied into the runtime image.
 - `contract_registry.py:KALI_TARGET_VERBS` and `KALI_MAINT_VERBS` own the Kali
   roster; `KALI_VERBS` is their union. Registration and `agent/skills/kali-exec/SKILL.md` mirror it.
 - `agent/scripts/assess/lib/kali_output.py:KALI_EXIT_CODES` owns terminal status exit codes;
@@ -137,7 +135,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `agent/scripts/assess/tests/test_dispatch_role_roster.py`, which also keeps role names off the
   clients' built-in subagent names.
 - `state_manager/dispatches.py:RENAMED_DISPATCH_ROLES` owns which role a retired role spelling means: a
-  stored dispatch keeps its spelling and a handoff may name the current role. `contract_registry.py`
+  stored dispatch keeps its spelling and a handoff may name the current role (`general` → `blind-reviewer`). `contract_registry.py`
   mirrors it, and `agent start`/`start-swarm`/`continue` register the current role. See:
   `orchestrator/backend/tests/test_renamed_dispatch_roles_mirror.py`.
 - `agent/scripts/assess/lib/producer_identity.py:resolve_report_writer` owns which dispatch a `report.md` or
@@ -154,8 +152,6 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `state_manager/report_readiness.py:report_qc_state` owns report.md QC currency (ADR 0045),
   served as report readiness `report_qc`; `transition_phase._report_qc_blockers` reads it.
   `finding_severity_band` owns the band-departure rule readiness and the finding point read share.
-- `agent/scripts/assess/lib/prompt_census.py` owns the advisory prompt measurements, including
-  `specialist_cites_operator_core` for a specialist-loaded line that points at an operator core.
 - `agent/scripts/assess/lib/config.py` checks backend engagement visibility through the
   engagement detail read before commands; summary/readiness assembly belongs to explicit readers.
 - `src/vigil_cli/orchestrator.py:lifecycle_endpoint` owns the local endpoint backend start/restart bind: the owned
@@ -164,7 +160,6 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `orchestrator_base_url` and `install.root` settings belong to; `agent/scripts/assess/lib/config.py:resolve_base_url`
   mirrors `paths.py:resolve_orchestrator_base_url` across the assess exec boundary. See:
   `tests/test_orchestrator_endpoint_selection.py`, `agent/scripts/assess/tests/test_assess_workspace_base_url.py`.
-- `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
 - `src/vigil_cli/config.py:claude_session_model` owns the Claude operator model per offensive track (`CLAUDE_TRACK_MODELS`)
   and its `VIGIL_CLAUDE_MODEL_<TRACK>` / `claude.model.<track>` overrides; `engagements.py:start_engagement` passes it as
   `--model=` unless the client tail forwards one. See: `tests/test_claude_session_model.py`.
@@ -173,10 +168,6 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   dispatch packets, launch continuations and `dispatch/handoff_renderer.py` share the immutable path and digest.
 - `code_analysis.py:list_queue_items` and `list_code_files` own exact selected-item/path reads for
   dispatch preparation; `state_manager/findings.py:count_findings` owns the ledger's count-only read.
-- `state_manager/assessment_summary.py` owns summary cache generations and shared build ownership;
-  its async facade lets HTTP summary/report readers join without occupying request workers.
-- `orchestrator/backend/app/request_diagnostics.py` owns long HTTP request tracking and independent
-  all-thread stack capture; `main.py` owns its ASGI/lifespan integration.
 - `orchestrator/backend/app/aggregate_reads.py` owns the engagement-wide aggregate GET routes
   (`AGGREGATE_READ_ROUTES`: readiness, coverage, by-family/by-host, depth ledger, resume brief), their
   worker budget (`VIGIL_BACKEND_AGGREGATE_READS`, default 3, capped one below `VIGIL_BACKEND_THREADPOOL`) and
@@ -184,6 +175,10 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `main.py` registers the middleware inside request diagnostics. See: `test_aggregate_read_limiter.py`.
 - `orchestrator/backend/app/json_response.py` owns lossless JSON escaping for validation errors
   and the activity API; activity response models validate Python values before transport rendering.
+- `services/activity_feed.py:get_activity_entry` owns `GET /engagements/{key}/activity/{entry_id}` (`audit:<id>` or
+  `event:<id>`): the item comes from the feed's own page projection, so it equals the feed's item for that row.
+- `orchestrator/frontend/src/components/record/RecordView.tsx` is the one detail view: Submissions, Proof work
+  (`?proof={slug}`) and Activity (`activity/ActivityRecord.tsx`, `?entry={id}`) open in it; `App.tsx` parses the routes.
 - `artifact_index.py:prepared_artifact_health` owns root-pinned evidence observations;
   `state_manager/proofs.py` prepares health before finding writes and reconciles file identities
   and database receipt ownership before commit. Nested writers retain their atomic boundary.
@@ -209,21 +204,25 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `src/vigil_cli/client_projects.py` owns stable per-engagement/client/mode project entries,
   atomic new-task selections, and immutable protocol-v1 dispatcher staging. `agent/scripts/native-client/project-binding.mjs`
   attests native task bindings and create-once session receipts; project selection never migrates an existing task.
-- `src/vigil_cli/client_checks.py` owns client prerequisites, bound-workspace/assets and exact-context hook inspection.
-  Historical `OBSERVED` events do not attest current builds or backend hydration.
-- `src/vigil_cli/client_context.py` discovers install-owned project identity for mode/client-check/assess.
-  It supplies session selectors, not application paths or endpoints; `client_checks.py:validate_context_binding` owns validation.
-- `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,
-  startup forwarding and assessment root-flag hoisting; each parser still owns its flags and validation.
-- `src/vigil_cli/prompts.py` owns shared terminal questions and searchable start pickers for engagement and remediation;
-  `main.py` resolves engagement, client, then mode before preflight without changing ambient resolution for other commands.
-- `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;
-  it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
 - `lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
 - `lib/scope.py:crawl_fence` owns the katana crawl fence (`-fs`/`-cs`/`-cos` from scope.json, matching `host_admitted`)
   that `kali katana` and `web-discovery` apply; scope flags in passthrough args replace it with a warning (ADR 0019).
   See: `agent/scripts/assess/tests/test_crawl_scope_fence.py`.
+- `lib/kali.py:prepare_execution_command` owns required headers on every target request: `_apply_required_headers`
+  injects them, `_verify_required_headers_in_script` reads scripts and inline programs, and `_require_attribution` refuses
+  the rest unless `--no-target-requests REASON` (Kali verbs, `kali job start`, `host-exec`) and no target in argv.
+  See: `agent/scripts/assess/tests/test_required_headers_every_request.py`.
+- `lib/config.py:input_path` types every file/directory input: `cli.py` runs `resolve_input_path_arguments`, so a relative
+  path absent from the cwd resolves under the engagement directory. See: `test_engagement_relative_input_paths.py`.
+- `commands/code_dispatch.py:_keepalive` owns `heartbeat --keepalive` (one process per lane, `--claims-file`): each lease
+  stops on its own answer, and all stop with the owner (`--owner-pid`), a dispatch no longer in progress, or `--max-lifetime`.
+- `state_manager/findings.py:_file_location_is_line_bound` owns whether a `file:` line names one place; in a minified file
+  (`LINE_UNBOUND_AVERAGE_LINE_BYTES`) duplicate and sibling matching compares `_IN_FILE_ANCHOR_KEYS` instead.
+- `src/vigil_cli/runtime.py:NUCLEI_TEMPLATES_DIR` (`/data/nuclei-templates`, kept across recreates) is where
+  `provision_nuclei_templates` downloads templates on a fresh runtime and `kali nuclei --update-templates` refreshes them.
+- `agent/.opencode/plugin/assessment-hooks.js:resolveDispatch` binds an OpenCode specialist to its packet-verified dispatch
+  (`agent bind-client-handle`); `reportTask` appends `Vigil dispatch status:` (handoff, held leases, next commands).
 - `agent/scripts/assess/lib/vocabulary.py:word_folder` mirrors `api/assessment.py:folded_vocabulary` (case and
   `-`/`_`/space ignored) for CLI status and label flags. See: `agent/scripts/assess/tests/test_cli_word_folding.py`.
 - `src/vigil_cli/engagements.py` owns offensive track creation, add-track, session mode validation, official-start
@@ -247,7 +246,11 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 
 ## Sync rules worth remembering
 
-- `agent/operator-core.md`, `agent/operator-core-blue.md` and `agent/agents/*.md` render to untracked wrappers and per-client agent trees via `agent/scripts/render-operator-prompts.sh` (`repo` writes red and blue into `agent/` and prunes its `GENERATED_PATHS`, which `.gitignore` mirrors; `check` validates sources, render determinism and red/blue agreement on shared paths). `vigil install` renders a checkout (`install.py:render_checkout_client_trees`, set by `InstallOptions.render_client_trees`); `vigil_build.py:_render_client_trees` renders the release bundle.
+- `agent/operator-core.md`, `agent/operator-core-blue.md` and `agent/agents/*.md` render to untracked wrappers and
+  per-client agent trees via `agent/scripts/render-operator-prompts.sh`: `repo` writes red and blue into `agent/` and
+  prunes its `GENERATED_PATHS` (`.gitignore` mirrors them); `check` validates sources, determinism and red/blue agreement.
+  `vigil install` renders a checkout (`install.py:render_checkout_client_trees`); `vigil_build.py:_render_client_trees`
+  renders the release bundle.
 - `agent/commands/` owns operator commands. Renderer `COMMAND_NAMES` and explicit client metadata drive `agent/.claude/commands`, `agent/.codex/skills`, and native OpenCode/ZCode command trees. See: ADR 0017.
 - `render-operator-prompts.sh` renders native assessment command/role assets under
   `agent/.opencode/assessment` and `agent/.zcode/assessment`; `assessment_clients.py`

@@ -31,6 +31,10 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, post-compaction
   operator rehydration, and session end. Command filtering is deliberately absent (ADR 0019).
   `goose-hook-adapter.sh` adapts Goose tool names.
+- `agent/scripts/assess/lib/audit_enums.py` owns Kali technique and probe-kind enums. Host-side only;
+  never copied into the runtime image.
+- `agent/scripts/assess/lib/prompt_census.py` owns the advisory prompt measurements, including
+  `specialist_cites_operator_core` for a specialist-loaded line that points at an operator core.
 
 ### src/vigil_cli/ — the universal CLI
 
@@ -59,6 +63,17 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
   `up.py:run_up` owns startup JSON/service states; `service_locks.py` serializes shared starts. `agent/scripts/assess/lib/kali_runtime_exec.py` owns first-use managed execution startup.
 - `src/vigil_cli/oob_relay.py` owns the install's OOB relay-slot identity; `oob.py`, `install.py`, `up.py` and `status.py` consume it.
 - `src/vigil_cli/term.py` owns terminal-only Rich rendering and fuzzy selection; callers keep plain/JSON output contracts.
+- `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
+- `src/vigil_cli/client_checks.py` owns client prerequisites, bound-workspace/assets and exact-context hook inspection.
+  Historical `OBSERVED` events do not attest current builds or backend hydration.
+- `src/vigil_cli/client_context.py` discovers install-owned project identity for mode/client-check/assess.
+  It supplies session selectors, not application paths or endpoints; `client_checks.py:validate_context_binding` owns validation.
+- `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,
+  startup forwarding and assessment root-flag hoisting; each parser still owns its flags and validation.
+- `src/vigil_cli/prompts.py` owns shared terminal questions and searchable start pickers for engagement and remediation;
+  `main.py` resolves engagement, client, then mode before preflight without changing ambient resolution for other commands.
+- `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;
+  it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
 
 ### orchestrator/backend
 
@@ -105,6 +120,12 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
   Body, guidance, and platform fields bind review identity; `app/db.py:_migrate_submission_platform` expands the GHSA constraint after backup.
 - `orchestrator/backend/app/services/activity_feed.py` owns the merged Activity feed (`GET /activity`, `api/activity.py`):
   categories, mirrored-event exclusion, cursors, cached summary-text search, and entity `ref`/`unlinked_reason`.
+  `GET /activity/{entry_id}` (`get_activity_entry`, ids `audit:<id>`/`event:<id>`) returns one feed item through the same
+  page projection, whatever filters the page was read with; the Activity record view reads it for an addressed entry the loaded page lacks.
+- `state_manager/assessment_summary.py` owns summary cache generations and shared build ownership;
+  its async facade lets HTTP summary/report readers join without occupying request workers.
+- `orchestrator/backend/app/request_diagnostics.py` owns long HTTP request tracking and independent
+  all-thread stack capture; `main.py` owns its ASGI/lifespan integration.
 - `orchestrator/backend/app/services/artifacts.py:ARTIFACT_SPECS` owns the engagement Files roster: listed root documents only, read with a byte bound.
 - `orchestrator/backend/app/services/assessment_memory.py` and `artifact_index.py` own the bounded
   resume brief and artifact index; output points to drill-down commands instead of embedding data.

@@ -304,6 +304,11 @@ The budget defaults to 20, Claude Code's limit. For another client, set
 `VIGIL_CLIENT_CONCURRENCY_BUDGET` in the environment or `client.concurrency_budget` in
 `~/.config/vigil/config.json`; the environment wins.
 
+The Z.AI Coding Plan rate limit is shared by every session on the account, so concurrent
+specialists, and other engagements on the same plan, draw on one allowance. Coding Plan users
+should set a low budget, for example `VIGIL_CLIENT_CONCURRENCY_BUDGET=3`, so `start-swarm`
+warns before a swarm outgrows what the plan serves at once.
+
 ## Forwarding flags to the client
 
 `vigil engagement start` is the one verb parsed leniently: any flag it does not own

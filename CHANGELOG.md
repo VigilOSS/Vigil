@@ -5,6 +5,51 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.9.0] - 2026-11-15
+
+### Added
+
+- Every target request carries the program's required headers, or the run is refused. A run
+  that sends no target request says so with `--no-target-requests <reason>`, recorded on its
+  audit row.
+- Submissions, Proof work and Activity open in the shared record view; an Activity entry has
+  its own address and `GET /engagements/{key}/activity/{entry_id}` read.
+- A fresh runtime downloads the nuclei templates into `/data/nuclei-templates`, kept across
+  container recreates; `kali nuclei --update-templates` refreshes them.
+
+### Changed
+
+- OpenCode specialists are bound to their dispatch. A task that ends empty, without a final
+  handoff or still holding leases ends with a `Vigil dispatch status:` line naming the close,
+  continue and lease commands.
+- OpenCode shell commands outlast a full Kali run.
+- Browser results print a bounded preview that names what it left out; the full output stays
+  in the HAR and DOM files.
+- WAF measurements are kept per host, and values that are not hosts are listed instead of
+  counted as hosts.
+- A relative input path missing from the working directory resolves against the engagement
+  directory, and the substitution is named on stderr.
+- Refusals name the expected span, callable, root finding or missing entries.
+- `code-dispatch heartbeat --keepalive` renews a whole lane's leases from one process and ends
+  with its lane: the owner process exits, the dispatch leaves `in_progress`, or
+  `--max-lifetime` passes.
+- The blind reviewer role is `blind-reviewer`; dispatches recorded under the old name still
+  read.
+- Generated client trees are rendered by `vigil install` and the release build, not
+  committed.
+
+### Fixed
+
+- `--model=<provider>/<model>#<variant>` applies the reasoning variant to OpenCode web, code
+  and blue launches.
+- OpenCode assessment sessions keep personal Claude Code context out. OpenCode remediation
+  sessions show no update prompt and keep the repository's own `CLAUDE.md` and skills.
+- Discovered-credential findings get canonical slugs with the recording dispatch's prefix.
+- Spec ingest keeps the scheme and port of the origin it resolves relative servers against.
+- Findings at different places in one minified bundle are told apart by source anchor or
+  function rather than by the shared line.
+- Requeue skips a target whose pending triggers its current review already resolved.
+
 ## [2.8.0] - 2026-11-15
 
 ### Added
