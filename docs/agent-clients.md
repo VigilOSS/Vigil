@@ -221,7 +221,8 @@ holding code-queue leases, the result also ends with a `Vigil dispatch status:`
 JSON line listing the leases and the exact close, continue and lease commands.
 
 On OpenCode 2, Vigil selects the operator through the session config and starts the TUI with
-`--standalone`; its plugin and hooks are verified on OpenCode 1.
+`--standalone`. OpenCode 2 does not load Vigil's OpenCode plugin, so specialists are not bound
+to their dispatch and Vigil's hooks do not run; OpenCode 1 has full support.
 
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
 is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.

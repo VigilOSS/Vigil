@@ -25,6 +25,7 @@ ORIGINAL_BOOTSTRAP = client_sessions.client_session_bootstrap
 def context(tmp_path, monkeypatch):
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(ROOT))
     monkeypatch.setenv("VIGIL_APPLICATION_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     root = tmp_path / "private"
     engagement = root / "engagements/acme"
     engagement.mkdir(parents=True)
@@ -319,13 +320,14 @@ def test_opencode_helper_path_finds_opencode_by_its_linked_name(context, monkeyp
 @pytest.mark.parametrize("arguments", [
     ["--model", "zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"],
     ["--model=zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"]])
-def test_opencode_2_start_selects_the_operator_and_model_through_config(context, monkeypatch, arguments):
+@pytest.mark.parametrize("version_output", ["opencode v2.3.0\n", "2.3.0"])
+def test_opencode_2_start_selects_the_operator_and_model_through_config(context, monkeypatch, arguments, version_output):
     """OpenCode 2 TUIs take neither --agent nor --model, and a background service
     would not see the session environment, so the launch runs standalone."""
     root, engagement, _ = context
     original = clients.shutil.which
     monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
-    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="2.3.0", stderr=""))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout=version_output, stderr=""))
     monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"share": "disabled"}))
     calls = []
     monkeypatch.chdir(ROOT)

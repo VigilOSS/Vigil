@@ -5,6 +5,14 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.9.2] - 2026-11-16
+
+### Fixed
+
+- `vigil engagement start --client opencode` recognises OpenCode 2's `opencode v2.x.y` version
+  output, so the launch no longer passes the removed `--agent` flag. The launch warns that
+  OpenCode 2 does not load Vigil's OpenCode plugin.
+
 ## [2.9.1] - 2026-11-15
 
 ### Fixed

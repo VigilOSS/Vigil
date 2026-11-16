@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -357,9 +358,9 @@ def _write_opencode_variant_state(path: Path, saved: dict) -> None:
 
 
 def _opencode_major(version: str | None) -> int | None:
-    """Major version from ``opencode --version`` output, or None when unknown."""
-    head = (version or "").strip().lstrip("v").split(".", 1)[0]
-    return int(head) if head.isdigit() else None
+    """Major version from ``opencode --version`` output (``1.18.10``, ``opencode v2.3.0``), or None."""
+    match = re.search(r"(?<![\d.])v?(\d+)\.\d+\.\d+", version or "")
+    return int(match.group(1)) if match else None
 
 
 def _opencode_2_arguments(forwarded: list[str]) -> tuple[list[str], str | None]:
@@ -530,8 +531,9 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                 raise SystemExit("OPENCODE_CONFIG_CONTENT must be a JSON object")
             environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({**content, "model": opencode_2_model})
             print(f"model: {opencode_2_model} (session config)", flush=True)
-        print(term.row("warn", f"OpenCode {native_version}: Vigil's OpenCode plugin and hooks are verified on 1.x; "
-                       "check specialist dispatch and hook activity in this session.", stream=sys.stdout), flush=True)
+        print(term.row("warn", "OpenCode 2 does not load Vigil's OpenCode plugin: specialists are not bound to "
+                       "their dispatch and Vigil's hooks do not run. OpenCode 1 has full support.",
+                       stream=sys.stdout), flush=True)
     else:
         argv = [executable, "--agent", "operator", *forwarded]
     if not no_autoprompt or focus is not None:
