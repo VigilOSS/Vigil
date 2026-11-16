@@ -1980,6 +1980,28 @@ def _unattributed_band_departure(
     }
 
 
+def _versioned_cvss_details(
+    details: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``details`` with a bare ``cvss_vector`` given the prefix its base metrics name.
+
+    Returns the details and the derived-field entry that names the prefixing
+    (``None`` when the vector already had a prefix, was absent, or names no single
+    version). Applied before anything scores or bands the vector, so the score and
+    band a write reads are those of the vector it stores.
+    """
+    bare_vector = (details or {}).get("cvss_vector")
+    prefixed_vector = versioned_vector(bare_vector) if isinstance(bare_vector, str) else None
+    if prefixed_vector is None:
+        return details, None
+    return {**(details or {}), "cvss_vector": prefixed_vector}, derived_field(
+        "details.cvss_vector", prefixed_vector, "details.cvss_vector",
+        f"details.cvss_vector '{bare_vector}' had no version prefix; its base "
+        f"metrics name {prefixed_vector.split('/', 1)[0]}, so stored "
+        f"'{prefixed_vector}'",
+    )
+
+
 def _derived_cvss_score(
     authored_details: dict[str, Any],
     effective_details: dict[str, Any],
@@ -2402,18 +2424,9 @@ def create_finding(
                     _json_object(existing["details_json"]) if existing is not None else {}
                 ),
             )
-        bare_vector = (details or {}).get("cvss_vector")
-        prefixed_vector = (
-            versioned_vector(bare_vector) if isinstance(bare_vector, str) else None
-        )
-        if prefixed_vector is not None:
-            details = {**(details or {}), "cvss_vector": prefixed_vector}
-            derived.append(derived_field(
-                "details.cvss_vector", prefixed_vector, "details.cvss_vector",
-                f"details.cvss_vector '{bare_vector}' had no version prefix; its base "
-                f"metrics name {prefixed_vector.split('/', 1)[0]}, so stored "
-                f"'{prefixed_vector}'",
-            ))
+        details, prefixed = _versioned_cvss_details(details)
+        if prefixed is not None:
+            derived.append(prefixed)
         # Every finding write — record, `finding update` (patch_finding), and the
         # verify checkpoint — funnels through here, so this is the one layer that
         # can hold cvss_score and cvss_vector to each other at write time. What
@@ -3968,10 +3981,11 @@ def verify_finding(
         }
         verification_provenance[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_stamp
         transition_metadata[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_stamp
-    details_payload = dict(details or {})
+    versioned_details, prefixed = _versioned_cvss_details(dict(details or {}))
+    details_payload = dict(versioned_details or {})
     existing_details = _json_object(existing["details_json"])
     existing_verification = _row_verification_status(existing)
-    derived: list[dict[str, Any]] = []
+    derived: list[dict[str, Any]] = [prefixed] if prefixed is not None else []
     advisories: list[dict[str, Any]] = []
     authored_reason = str(reason_text or "")
     if not authored_reason.strip():

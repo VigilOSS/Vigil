@@ -120,6 +120,56 @@ def test_a_reason_only_variance_fills_the_rest_from_the_verification(client, unv
     )
 
 
+@pytest.fixture
+def unscored(client, isolate_settings):
+    """A high-severity finding with no CVSS yet: the verify scores it."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    details = {
+        key: value for key, value in _MEDIUM_DETAILS.items()
+        if key not in {"cvss_score", "cvss_vector"}
+    }
+    _reportable_finding(
+        client, eng, slug="SV-002", verification_status="unreviewed", details=details,
+    )
+    return "SV-002"
+
+
+_BARE_MEDIUM_VECTOR = "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+
+
+def test_a_verify_bands_a_bare_vector_by_the_version_its_metrics_name(client, unscored):
+    """The verify scores the vector it stores, so the prefix the write derives
+    is applied before the band is read: a variance is judged against it."""
+    response = _confirm(
+        client, unscored, _receipt(client, unscored),
+        details={"cvss_vector": _BARE_MEDIUM_VECTOR},
+        severity_variance={"reason": "Contractual exposure for Acme justifies high."},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    stored = body["finding"]["details"]
+    assert stored["cvss_vector"] == f"CVSS:3.1/{_BARE_MEDIUM_VECTOR}"
+    assert stored["cvss_score"] == 5.3
+    assert body["severity_variance"]["normal_band"] == "medium"
+    derived = {entry["field"] for entry in body["derived"]}
+    assert {"details.cvss_vector", "details.cvss_score"} <= derived
+
+
+def test_a_verify_names_the_band_departure_a_bare_vector_scores(client, unscored):
+    response = _confirm(
+        client, unscored, _receipt(client, unscored),
+        details={"cvss_vector": _BARE_MEDIUM_VECTOR},
+    )
+
+    assert response.status_code == 200, response.text
+    assert any(
+        advisory["kind"] == "severity_cvss_band_departure"
+        for advisory in response.json()["advisories"]
+    )
+
+
 def test_an_authored_variance_field_that_disagrees_is_refused(client, unverified):
     response = _confirm(client, unverified, _receipt(client, unverified), severity_variance={
         "reason": "Contractual exposure for Acme justifies high.", "normal_band": "low",
