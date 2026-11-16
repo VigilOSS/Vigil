@@ -287,7 +287,7 @@ Generated specialist definitions embed the role prompt. Specialists never load t
 |---------|-----------|------|
 | **Claude Code** | Native `Agent` tool with `subagent_type` set to the registered role | A general-purpose child does not load the role wrapper. |
 | **Codex** | Actual native spawn schema | Set `fork_turns: none` when exposed (or the fresh-context equivalent). Installed TOML alone does not prove the role loaded. |
-| **OpenCode** | Native `task` tool with `subagent_type` set to the registered role | OpenCode's built-in default subagent does not load the role wrapper. |
+| **OpenCode** | OpenCode 1: native `task` tool with `subagent_type` set to the registered role. OpenCode 2: native `subagent` tool with `agent` set to the registered role; the call returns at once, so act on the child's result, which arrives later as a `<subagent …>` message | OpenCode's built-in subagents do not load the role wrapper. |
 | **Goose** | `delegate source <role>` | Roster in `.goose/recipes/*.yaml`, resolved through `GOOSE_RECIPE_PATH`. |
 | **Kimi Code** | **INLINE** — the operator runs `vigil assess kali` itself and applies the role's methodology directly | No specialist roster is generated. |
 
@@ -368,10 +368,10 @@ and authority boundaries) and returns a short `launch_message` naming its path a
 that envelope to a fresh native specialist with the registered role selected; never copy identity
 blocks into a second prompt. Launch only on a `launch_required=true` receipt: an exact retry returns
 the same capture with `launch_required=false`, for inspection, not a second worker. After launch, bind
-the native handle with `vigil assess agent bind-client-handle` unless the task result's
-`Vigil dispatch binding:` line (OpenCode) reports `bound` or `already_bound`; the handle and the backend
-dispatch ID are different namespaces. After an interrupted return, inspect the actual native tasks and
-command execution before any replacement (ZCode: `docs/zcode-setup.md` "Interrupted specialists").
+the native handle with `vigil assess agent bind-client-handle` unless the `Vigil dispatch binding:` line
+reports `bound` or `already_bound` (OpenCode: in the `task` result on OpenCode 1, in a separate Vigil note in
+this session on OpenCode 2); the handle and the backend dispatch ID are different namespaces. After an
+interrupted return, inspect the actual native tasks and command execution before any replacement (ZCode: `docs/zcode-setup.md` "Interrupted specialists").
 
 Put engagement-wide briefing in `--standing-brief-file <path>`; it is captured once and each packet
 points to its digest. Keep `--task` and `--packet-file` about this lane. Continuation

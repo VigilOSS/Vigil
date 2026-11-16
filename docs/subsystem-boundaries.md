@@ -66,6 +66,8 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
 - `src/vigil_cli/client_checks.py` owns client prerequisites, bound-workspace/assets and exact-context hook inspection.
   Historical `OBSERVED` events do not attest current builds or backend hydration.
+- `src/vigil_cli/opencode_launch.py` owns the supported OpenCode range, major detection and the per-major operator
+  flags, model/variant mapping and generated-launcher exec for every OpenCode start; callers own their workspaces.
 - `src/vigil_cli/client_context.py` discovers install-owned project identity for mode/client-check/assess.
   It supplies session selectors, not application paths or endpoints; `client_checks.py:validate_context_binding` owns validation.
 - `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,

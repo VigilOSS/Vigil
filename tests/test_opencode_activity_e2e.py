@@ -76,6 +76,32 @@ for(let i=0;i<2;i++) {
         assert result.returncode == 0, result.stderr
         return received
 
+    def run_v2(tool, event, *, catalog="available"):
+        # The OpenCode 2 host: one execute.after event per call, the MCP namespace on the tool entry.
+        script = """
+import {readFileSync} from 'node:fs';
+const module=await import('data:text/javascript;base64,'+readFileSync(process.argv[1]).toString('base64'));
+const catalog=process.argv[4];
+const ctx={
+ mcp:{list:async()=>catalog==='unavailable'?Promise.reject(new Error('offline')):
+   catalog==='timeout'?await new Promise(()=>{}):
+   ({location:{},data:[{name:'acme-server',status:{status:'connected'}},{name:'acme.example',status:{status:'connected'}},
+     {name:'offline',status:{status:'failed',error:'down'}}]})},
+ tool:{list:async()=>[{id:'shell',options:{codemode:false}},{id:'local_custom'},
+   {id:'acme-server_lookup',options:{namespace:'acme-server'}},{id:'acme_example_lookup',options:{namespace:'acme_example'}},
+   {id:'offline_lookup',options:{namespace:'offline'}}]}};
+const adapter=await module.VigilAssessmentHooksV2({ctx});
+const event={tool:process.argv[2],sessionID:'native-session',agent:'operator',messageID:'msg_1',id:'native-call',
+ input:{command:'printf Acme',query:'Acme'},...JSON.parse(process.argv[3])};
+for(let i=0;i<2;i++) await adapter['tool.execute.after'](structuredClone(event));
+"""
+        result = subprocess.run(["node", "--input-type=module", "-e", script,
+            str(ROOT / "agent/.opencode/plugin/assessment-hooks.js"), tool, json.dumps(event), catalog],
+            env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)}, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        return received
+
+    run.v2 = run_v2
     try:
         yield run
     finally:
@@ -120,3 +146,41 @@ def test_mcp_server_identity_uses_native_sanitization(activity_runtime):
     rows = activity_runtime("acme_example_lookup", {"structuredContent": {"count": 2}})
     assert len(rows) == 1
     assert rows[0][-3] == "mcp__acme_example_lookup"
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_opencode_2_shell_exit_reaches_activity_once(activity_runtime, exit_code):
+    rows = activity_runtime.v2("shell", {"status": "completed", "result": {
+        "output": {"output": "Acme output", "exitCode": exit_code, "wallTimeSeconds": 0.1},
+        "content": [{"type": "text", "text": "Acme output"}], "metadata": {"status": "completed", "exit": exit_code}}})
+    assert len(rows) == 1
+    assert rows[0][-1] == ("exit=7 | " if exit_code else "") + "Acme output"
+
+
+def test_opencode_2_failed_shell_reaches_activity_once(activity_runtime):
+    rows = activity_runtime.v2("shell", {"status": "error", "error": {"message": "Acme denied"}})
+    assert len(rows) == 1
+    assert rows[0][-1].startswith("exit=1")
+
+
+@pytest.mark.parametrize("tool,result,expected", [
+    ("acme-server_lookup", {"output": {"count": 2}, "content": [{"type": "text", "text": "Acme answer"}]},
+     '"count":2'),
+    ("acme_example_lookup", {"content": [{"type": "text", "text": "Acme answer"}]}, "Acme answer"),
+])
+def test_opencode_2_mcp_response_reaches_activity_once(activity_runtime, tool, result, expected):
+    rows = activity_runtime.v2(tool, {"status": "completed", "result": result})
+    assert len(rows) == 1
+    assert rows[0][-3] == "mcp__" + tool
+    assert expected in rows[0][-1]
+
+
+@pytest.mark.parametrize("tool", ["offline_lookup", "local_custom", "unknown_lookup"])
+def test_opencode_2_non_mcp_tools_keep_existing_noise_policy(activity_runtime, tool):
+    assert activity_runtime.v2(tool, {"status": "completed", "result": {"output": "Acme", "content": []}}) == []
+
+
+@pytest.mark.parametrize("catalog", ["unavailable", "timeout"])
+def test_opencode_2_unverifiable_mcp_catalog_does_not_fabricate_identity(activity_runtime, catalog):
+    assert activity_runtime.v2("acme-server_lookup", {"status": "completed", "result": {
+        "content": [{"type": "text", "text": "Acme"}]}}, catalog=catalog) == []

@@ -487,7 +487,7 @@ render_assessment_clients() {
         elif [[ "$name" == operator ]]; then
           printf 'mode: primary\n'
         else
-          printf 'mode: subagent\n'
+          printf 'mode: subagent\n%s' "$OPENCODE_SPECIALIST_PERMISSION"
         fi
         printf -- '---\n\n<!-- GENERATED FILE — DO NOT EDIT. -->\n'
         render_stamp md
@@ -1009,6 +1009,12 @@ EOF
   perl -0pi -e 's/\n+\z/\n/' "$out"
 }
 
+# OpenCode never auto-answers its question tool, so a specialist that asks one
+# would hold its dispatch, and an unattended run, until someone answers. Every
+# specialist wrapper (standard and assessment trees) denies it; only the operator
+# talks to the user. OpenCode 1 and 2 both read this frontmatter permission.
+OPENCODE_SPECIALIST_PERMISSION=$'permission:\n  question: deny\n'
+
 # Write a single OpenCode wrapper for $agent_name pinned to $model. The optional
 # $name_suffix/$desc_suffix produce an opposite-tier VARIANT sibling
 # (`<role>-pro.md` / `<role>-flash.md`); empty suffixes produce the canonical
@@ -1027,18 +1033,18 @@ render_one_opencode_wrapper() {
   local out="$OPENCODE_AGENTS_DIR/$agent_name$name_suffix.md"
   mkdir -p "$(dirname "$out")"
 
-  # OpenCode agent frontmatter: description + mode + model. Specialists are
-  # `mode: subagent` so they are dispatchable only via the operator's
-  # `task`/@mention (never a primary entrypoint). The OPERATOR is `mode: primary`
-  # because `opencode run --agent operator` (written by engagements._write_launchers)
-  # must be able to launch it AS the top-level brain: OpenCode 1.17.5 refuses to
-  # run a `mode: subagent` agent as the entrypoint — it prints "agent X is a
-  # subagent, not a primary agent. Falling back to default agent" and silently
-  # runs the built-in `build` primary instead, which reads AGENTS.md as mere
-  # context and does the work inline (0 specialist dispatches). A primary operator
-  # still has the `task` tool and dispatches the subagent roster normally.
-  # `model` is pinned on EVERY role because OpenCode subagents otherwise inherit
-  # the invoking primary's model, defeating routing.
+  # OpenCode agent frontmatter: description + mode + model (+ the specialist
+  # permission above). Specialists are `mode: subagent` so they are dispatchable
+  # only by the operator (`task` on OpenCode 1, `subagent` on OpenCode 2), never
+  # a primary entrypoint. The OPERATOR is `mode: primary` because the generated
+  # start_opencode.sh selects it as the top-level brain (`--agent operator` on
+  # OpenCode 1, the engagement config's `default_agent` on OpenCode 2): OpenCode
+  # refuses a `mode: subagent` entrypoint — it prints "agent X is a subagent, not
+  # a primary agent. Falling back to default agent" and silently runs the
+  # built-in `build` primary instead, which reads AGENTS.md as mere context and
+  # does the work inline (0 specialist dispatches). `model` is pinned on EVERY
+  # role because OpenCode subagents otherwise inherit the invoking primary's
+  # model, defeating routing.
   if [[ "$agent_name" == "operator" ]]; then
     {
       cat <<EOF
@@ -1070,7 +1076,7 @@ EOF
 description: $description$desc_suffix
 mode: subagent
 model: $model
----
+${OPENCODE_SPECIALIST_PERMISSION}---
 
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/agents/$agent_name.md -->

@@ -41,7 +41,8 @@ def test_client_check_is_available_without_an_active_engagement(tmp_path, monkey
 
 @pytest.mark.parametrize(("version", "status"), [
     ("1.18.10\n", "OK"), ("1.19.3\n", "OK"), ("1.18.9\n", "FAIL"),
-    ("2.0.0\n", "FAIL"), ("1.19.3-beta\n", "UNVERIFIED"),
+    ("opencode v2.3.0\n", "OK"), ("2.0.0\n", "OK"), ("v2.3.0\n", "OK"),
+    ("opencode v3.0.0\n", "FAIL"), ("1.19.3-beta\n", "UNVERIFIED"), ("opencode v2.3\n", "UNVERIFIED"),
 ])
 def test_opencode_version_is_bounded_and_never_contacts_a_provider(monkeypatch, version, status):
     calls = []

@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
 import shlex
 import shutil
@@ -18,7 +17,7 @@ import subprocess
 import sys
 import uuid
 
-from . import term
+from . import opencode_launch, term
 from .application import _read_file, application_provenance, session_cli_directory
 from .install_fs import open_pinned_directory
 from .paths import agent_root, resolve_orchestrator_base_url
@@ -228,12 +227,14 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
             workspace_files[f".opencode/{name}"] = data
         # Project config is disabled for the task, so the permission block that
         # keeps task children from hanging on an unanswered "ask" lives here.
-        from .engagements import _OPENCODE_PERMISSION
-        workspace_files[".opencode/opencode.json"] = _json({"$schema": "https://opencode.ai/config.json",
+        from .engagements import _OPENCODE_PERMISSION, _deny_built_in_subagent_questions
+        native_config = {"$schema": "https://opencode.ai/config.json",
             "compaction": {"auto": True}, "instructions": [str(binding["project"]) + "/AGENTS.md"],
             "permission": dict(_OPENCODE_PERMISSION), "autoupdate": False,
             # OpenCode 2 TUIs take no --agent; both majors honour default_agent.
-            "default_agent": "operator"})
+            "default_agent": "operator"}
+        _deny_built_in_subagent_questions(native_config)
+        workspace_files[".opencode/opencode.json"] = _json(native_config)
     else:
         plugin_root = install_root / "client-plugins" / release_hash[:24] / "zcode"
         plugin_files = {}
@@ -288,105 +289,6 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
     return workspace, binding
 
 
-def _opencode_model_variants(arguments: list[str]) -> tuple[list[str], dict[str, str]]:
-    """Split ``--model provider/model#variant`` into the TUI's model and variant.
-
-    The TUI rejects a model id carrying ``#variant`` and takes the variant of a
-    new conversation only from the per-model choice it saved in its state
-    ``model.json``; specialists then inherit each operator message's variant.
-    """
-    forwarded: list[str] = []
-    variants: dict[str, str] = {}
-    tail = iter(arguments)
-    for argument in tail:
-        flag, value = argument, None
-        for name in ("--model", "-m"):
-            if argument == name:
-                value = next(tail, None)
-                if value is None:
-                    raise SystemExit(f"OpenCode {name} requires provider/model or provider/model#variant")
-            elif argument.startswith(name + "="):
-                flag, value = name + "=", argument.split("=", 1)[1]
-        if value is None:
-            forwarded.append(argument)
-            continue
-        model, separator, variant = value.partition("#")
-        if separator:
-            if "/" not in model.strip("/") or not variant or "#" in variant:
-                raise SystemExit(f"OpenCode --model {value!r} must be provider/model#variant")
-            variants[model] = variant
-        forwarded.extend([flag + model] if flag.endswith("=") else [flag, model])
-    return forwarded, variants
-
-
-def _opencode_variant_state(variants: dict[str, str]) -> tuple[Path, dict] | None:
-    """Read OpenCode's saved model choices and apply the launch's variants."""
-    if not variants:
-        return None
-    path = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "opencode/model.json"
-    saved: object = {}
-    try:
-        saved = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        pass
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"Cannot apply the OpenCode variant: {path} is unreadable ({exc}); "
-                         "repair it or choose the variant in OpenCode") from exc
-    if not isinstance(saved, dict) or not isinstance(saved.get("variant", {}), dict):
-        raise SystemExit(f"Cannot apply the OpenCode variant: {path} is not a JSON object with an "
-                         "object variant field; repair it or choose the variant in OpenCode")
-    saved["variant"] = {**saved.get("variant", {}), **variants}
-    return path, saved
-
-
-def _write_opencode_variant_state(path: Path, saved: dict) -> None:
-    """Replace the native choice file atomically, as the TUI's own picker would."""
-    target = path.resolve() if path.exists() else path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
-    temporary = target.with_name(f".{target.name}.vigil-{uuid.uuid4().hex}")
-    try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(saved, handle)
-        os.chmod(temporary, mode)
-        os.replace(temporary, target)
-    except OSError as exc:
-        raise SystemExit(f"Cannot apply the OpenCode variant to {target}: {exc}") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _opencode_major(version: str | None) -> int | None:
-    """Major version from ``opencode --version`` output (``1.18.10``, ``opencode v2.3.0``), or None."""
-    match = re.search(r"(?<![\d.])v?(\d+)\.\d+\.\d+", version or "")
-    return int(match.group(1)) if match else None
-
-
-def _opencode_2_arguments(forwarded: list[str]) -> tuple[list[str], str | None]:
-    """Map 1.x-style launch flags onto the OpenCode 2 TUI.
-
-    The 2.x TUI accepts neither ``--agent`` nor ``--model``; the model (with an
-    optional ``#variant``) moves into the session's config content, and the
-    hidden 1.x permission alias becomes ``--auto``.
-    """
-    arguments: list[str] = []
-    model = None
-    tail = iter(forwarded)
-    for argument in tail:
-        if argument in {"--model", "-m"}:
-            model = next(tail, None)
-            if model is None:
-                raise SystemExit(f"OpenCode {argument} requires provider/model or provider/model#variant")
-        elif argument.startswith(("--model=", "-m=")):
-            model = argument.split("=", 1)[1]
-        elif argument == "--dangerously-skip-permissions":
-            arguments.append("--auto")
-        else:
-            arguments.append(argument)
-    return arguments, model
-
-
 def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                  extra_args: list[str], *, no_autoprompt: bool = False) -> None:
     """Start one selected mode; do not infer GUI native-session ownership."""
@@ -423,22 +325,10 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         executable = shutil.which("opencode")
         if executable is None:
             raise SystemExit("OpenCode CLI not found on PATH")
-        try:
-            probe = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                   check=False, timeout=10)
-            if probe.returncode == 0:
-                native_version = probe.stdout.strip() or probe.stderr.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass  # Diagnostic state remains unverified; no native version invented.
-    opencode_2 = client == "opencode" and (_opencode_major(native_version) or 0) >= 2
-    variants: dict[str, str] = {}
-    variant_state = None
-    opencode_2_model = None
-    if opencode_2:
-        forwarded, opencode_2_model = _opencode_2_arguments(forwarded)
-    else:
-        forwarded, variants = _opencode_model_variants(forwarded)
-        variant_state = _opencode_variant_state(variants)
+        # An unverified version stays None in the binding; no native version is invented.
+        native_version = opencode_launch.probe_version(executable)
+    launch = (opencode_launch.plan_operator_launch(native_version, forwarded, os.environ.get("OPENCODE_CONFIG_CONTENT"))
+              if client == "opencode" else None)
     from .client_sessions import client_session_bootstrap, record_client_session
     # Native preparation writes only immutable task assets and its own stable
     # selector; it does not refresh the shared engagement-root client files.
@@ -517,34 +407,16 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         "VIGIL_SESSION_ENGAGEMENT_DIR": binding["engagement_dir"], "VIGIL_OPERATOR_MODE": mode,
         "VIGIL_INSTALL_DIR": binding["install_root"], "VIGIL_CLIENT_NAME": client,
         "VIGIL_REQUESTED_CLIENT": client, "ORCHESTRATOR_BASE_URL": binding["backend_url"]})
-    assert executable is not None
-    if opencode_2:
-        # A background service would not inherit this session's config and
-        # environment, so the TUI runs its own server.
-        argv = [executable, "--standalone", *forwarded]
-        if opencode_2_model is not None:
-            try:
-                content = json.loads(environment.get("OPENCODE_CONFIG_CONTENT") or "{}")
-            except ValueError as exc:
-                raise SystemExit(f"OPENCODE_CONFIG_CONTENT is not valid JSON: {exc}") from exc
-            if not isinstance(content, dict):
-                raise SystemExit("OPENCODE_CONFIG_CONTENT must be a JSON object")
-            environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({**content, "model": opencode_2_model})
-            print(f"model: {opencode_2_model} (session config)", flush=True)
-        print(term.row("warn", "OpenCode 2 does not load Vigil's OpenCode plugin: specialists are not bound to "
-                       "their dispatch and Vigil's hooks do not run. OpenCode 1 has full support.",
-                       stream=sys.stdout), flush=True)
-    else:
-        argv = [executable, "--agent", "operator", *forwarded]
-    if not no_autoprompt or focus is not None:
-        prompt = "" if no_autoprompt else opening
+    assert executable is not None and launch is not None
+    argv = [executable, *opencode_launch.operator_arguments(launch.major), *launch.arguments]
+    # A resumed conversation already ran the startup procedure; only a focus is new.
+    autoprompt = not no_autoprompt and not opencode_launch.resumes_session(launch.arguments)
+    if autoprompt or focus is not None:
+        prompt = opening if autoprompt else ""
         if focus is not None:
             prompt += ("\n\nOperator focus: " if prompt else "") + focus
         argv.extend(["--prompt", prompt])
-    if variant_state is not None:
-        _write_opencode_variant_state(*variant_state)
-        for model, variant in variants.items():
-            print(f"variant: {variant} for {model} (saved as OpenCode's choice for this model)", flush=True)
+    opencode_launch.apply_launch(launch, environment)
     os.chdir(workspace)
     from .client_sessions import record_client_launch
     record_client_launch(install_root, engagement, client, mode)

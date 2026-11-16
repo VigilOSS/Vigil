@@ -1055,6 +1055,8 @@ def test_entrypoint_repair_skips_external_symlinked_destination(
 ) -> None:
     install_root, engagement_dir, _bin_dir = _build_entrypoint_fixture(tmp_path)
     destination = engagement_dir / relative_path
+    if relative_path == ".opencode/plugins":
+        destination.mkdir(exist_ok=True)  # retired-copy directory an earlier release wrote
     outside = tmp_path / f"outside-{relative_path.replace('/', '-')}"
     if destination.is_dir() and not destination.is_symlink():
         shutil.rmtree(destination)
@@ -1486,6 +1488,66 @@ def test_opencode_launcher_opens_a_session(
     assert result.returncode == 0, result.stderr
     payload = json.loads(capture.read_text())
     assert [Path(payload["argv"][0]).name, *payload["argv"][1:]] == expected_tail
+
+
+@pytest.mark.parametrize(
+    ("version_output", "expected_prefix"),
+    [
+        ("1.18.10", ["opencode", "--agent", "operator", "--dangerously-skip-permissions"]),
+        # OpenCode 2 has no --agent: the engagement config's default_agent selects
+        # the operator, and the TUI runs its own server so that server inherits the
+        # launcher's environment.
+        ("opencode v2.3.0", ["opencode", "--standalone", "--auto"]),
+        ("2.3.0", ["opencode", "--standalone", "--auto"]),
+    ],
+)
+def test_opencode_launcher_selects_the_flags_of_the_installed_major(
+    tmp_path: Path, version_output: str, expected_prefix: list[str]
+) -> None:
+    install_root, engagement_dir, bin_dir = _build_entrypoint_fixture(tmp_path)
+    (bin_dir / "opencode-capture").write_text(_CAPTURE_STUB)
+    (bin_dir / "opencode-capture").chmod(0o755)
+    (bin_dir / "opencode").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = --version ]; then printf "%s\\n" {shlex.quote(version_output)}; exit 0; fi\n'
+        f'exec {shlex.quote(str(bin_dir / "opencode-capture"))} "$@"\n'
+    )
+    capture = tmp_path / "opencode.json"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+            "VIGIL_ENTRYPOINT_CAPTURE": str(capture),
+            "VIGIL_PATH_EXPANSION": "must-not-expand",
+        }
+    )
+
+    result = subprocess.run(
+        [str(engagement_dir / "start_opencode.sh"), "--prompt", "operator task"],
+        cwd=engagement_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(capture.read_text())
+    assert payload["argv"][1:] == [*expected_prefix[1:], "--prompt", "operator task"]
+    assert json.loads(payload["files"]["opencode.json"])["default_agent"] == "operator"
+
+    # OpenCode 2 rejects a repeated --auto; a forwarded one replaces the launcher's.
+    result = subprocess.run(
+        [str(engagement_dir / "start_opencode.sh"), "--auto"],
+        cwd=engagement_dir, env=env, check=False, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(capture.read_text())["argv"][1:]
+    if "--standalone" in expected_prefix:
+        assert argv == ["--standalone", "--auto"]
+    else:
+        assert argv == [*expected_prefix[1:], "--auto"]
 
 
 @pytest.mark.parametrize(

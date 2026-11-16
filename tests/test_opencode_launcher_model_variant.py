@@ -9,11 +9,27 @@ assessment start does and saves it as OpenCode's choice for that model.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from vigil_cli import engagements
+
+
+def _installed_opencode(monkeypatch: pytest.MonkeyPatch, version_output: str) -> None:
+    """Answer the launch's ``opencode --version`` probe without a host install."""
+    original_which = engagements.shutil.which
+    monkeypatch.setattr(engagements.shutil, "which",
+                        lambda name: "/native/opencode" if name == "opencode" else original_which(name))
+    original_run = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if list(argv) == ["/native/opencode", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, version_output, "")
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
 
 
 @pytest.fixture
@@ -31,6 +47,7 @@ def blue_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(application))
     monkeypatch.setattr(engagements, "set_active_engagement", lambda *args: None)
     monkeypatch.setattr(engagements.os, "chdir", lambda *args: None)
+    _installed_opencode(monkeypatch, "1.18.10\n")
     return path
 
 
@@ -76,3 +93,32 @@ def test_blue_opencode_start_refuses_an_unreadable_choice_file_before_launch(
 
     assert launched == []
     assert saved.read_text() == "[]"
+
+
+@pytest.mark.parametrize("version_output", ["opencode v2.3.0\n", "2.3.0\n"])
+@pytest.mark.parametrize(
+    "arguments",
+    [["--model=acme/model-1#max", "--dangerously-skip-permissions"],
+     ["--model", "acme/model-1#max", "--dangerously-skip-permissions"]],
+)
+def test_opencode_2_start_moves_the_model_into_the_session_config(
+    tmp_path, monkeypatch, blue_engagement, arguments, version_output
+) -> None:
+    """OpenCode 2 has no --model: the operator's model rides the session config,
+    where it outranks the operator wrapper's pinned model as --model does on 1.x."""
+    saved = _saved_choices(tmp_path, monkeypatch)
+    _installed_opencode(monkeypatch, version_output)
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"share": "disabled"}))
+    launched: list[list[str]] = []
+    monkeypatch.setattr(engagements.os, "execv", lambda path, argv: launched.append(argv))
+
+    engagements.start_engagement(tmp_path, blue_engagement, "opencode", arguments)
+
+    argv = launched[0]
+    assert not any(argument.startswith(("--model", "-m")) or "acme/model-1" in argument for argument in argv)
+    assert "--auto" in argv and "--dangerously-skip-permissions" not in argv
+    content = json.loads(engagements.os.environ["OPENCODE_CONFIG_CONTENT"])
+    assert content == {"share": "disabled", "model": "acme/model-1#max",
+                       "agent": {"operator": {"model": "acme/model-1#max"}}}
+    # A saved per-model choice outranks a configured variant, so it is saved too.
+    assert json.loads(saved.read_text())["variant"] == {"acme/model-1": "max", "acme/model-2": "low"}

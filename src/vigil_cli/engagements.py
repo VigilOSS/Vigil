@@ -1836,17 +1836,19 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
 
         start_client(install_root, engagement_dir, client, selected_mode, extra_args, no_autoprompt=no_autoprompt)
         return
-    opencode_variants: dict[str, str] = {}
-    opencode_variant_state = None
+    opencode = None
     if client == "opencode":
-        # The launcher hands these flags to the OpenCode TUI, which rejects a model
-        # id carrying ``#variant``: split it off and save it as OpenCode's choice
-        # for that model, exactly as the web/code assessment start does. Read and
-        # validated here, before any side effect; written just before the exec.
-        from .assessment_clients import _opencode_model_variants, _opencode_variant_state
+        # The launcher picks the operator flags of the installed major itself; the
+        # forwarded flags are mapped here exactly as the web/code assessment start
+        # maps them. Validated before any side effect; applied just before the exec.
+        from . import opencode_launch
 
-        extra_args, opencode_variants = _opencode_model_variants(list(extra_args))
-        opencode_variant_state = _opencode_variant_state(opencode_variants)
+        executable = shutil.which("opencode")
+        opencode = opencode_launch.plan_operator_launch(
+            opencode_launch.probe_version(executable) if executable is not None else None,
+            list(extra_args), os.environ.get("OPENCODE_CONFIG_CONTENT"),
+        )
+        extra_args = opencode.arguments
     from .client_sessions import client_session_bootstrap, record_client_session
 
     with client_session_bootstrap(install_root, engagement_dir, concurrent=True) as refresh_shared:
@@ -1950,16 +1952,10 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
             "do not repeat source confirmation or dispatch duplicate workers merely because this client is new."
         )
         extra_args = [*flags, setup + (f"\n\nAdditional context:\n{message}" if message else "")]
-    if opencode_variant_state is not None:
-        from .assessment_clients import _write_opencode_variant_state
+    if opencode is not None:
+        from .opencode_launch import apply_launch
 
-        _write_opencode_variant_state(*opencode_variant_state)
-        for model, variant in opencode_variants.items():
-            print(
-                f"variant: {variant} for {model} (saved as OpenCode's choice for this model)",
-                file=sys.stderr,
-                flush=True,
-            )
+        apply_launch(opencode, os.environ, stream=sys.stderr)
     os.chdir(engagement_dir)
     from .client_sessions import record_client_launch
     record_client_launch(install_root, engagement_dir, client, selected_mode)
@@ -2980,6 +2976,21 @@ def _write_claude_config(
 # for task children — it must be this project opencode.json. Engagements run isolated with
 # full authorization, so blanket-allow is the intended posture.
 _OPENCODE_PERMISSION: dict = {"*": "allow", "external_directory": "allow", "doom_loop": "allow"}
+# The project-wide allow overrides the built-in subagents' question deny; a
+# question nobody answers stalls the dispatch that asked it.
+_OPENCODE_BUILT_IN_SUBAGENTS = ("general", "explore")
+
+
+def _deny_built_in_subagent_questions(config: dict) -> None:
+    """Deny the question tool where the config leaves it open; a hand-set value of any shape stays."""
+    agents = config.setdefault("agent", {})
+    if not isinstance(agents, dict):
+        return
+    for name in _OPENCODE_BUILT_IN_SUBAGENTS:
+        agent = agents.setdefault(name, {})
+        permission = agent.setdefault("permission", {}) if isinstance(agent, dict) else None
+        if isinstance(permission, dict):
+            permission.setdefault("question", "deny")
 
 
 def _load_opencode_config(eng_dir: Path) -> dict:
@@ -2995,6 +3006,9 @@ def _load_opencode_config(eng_dir: Path) -> dict:
             config = {}
     config.setdefault("$schema", "https://opencode.ai/config.json")
     config.setdefault("permission", dict(_OPENCODE_PERMISSION))
+    _deny_built_in_subagent_questions(config)
+    # OpenCode 2 has no --agent flag; this selects the operator on both majors.
+    config["default_agent"] = "operator"
     return config
 
 
@@ -3008,21 +3022,15 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
     Mirrors ``_write_codex_config`` / ``_write_claude_config``: OpenCode reads
     neither Claude's ``settings.json`` nor Codex's ``config.toml``, so the standard
     activity-log hook ships as an OpenCode *plugin* copied from the agent-root
-    template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
-    written to BOTH ``.opencode/plugin/`` and ``.opencode/plugins/`` so it loads
-    regardless of which directory name the installed OpenCode honours (the binary
-    documents both; the singular ``plugin/`` is predominant). The specialist roster
-    is exposed via symlink, exactly like Codex/Claude.
+    template ``agent/.opencode/plugin/standard-hooks.js``, written once into
+    ``.opencode/plugin/`` (both OpenCode majors scan ``plugin/`` and ``plugins/``,
+    and OpenCode 2 rejects a second module with the same plugin id). The
+    specialist roster is exposed via symlink, exactly like Codex/Claude.
 
     This is the source of the standard PostToolUse logging for OpenCode.
     """
-    src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
-    if src.exists():
-        body = src.read_text(encoding="utf-8")
-        for dirname in ("plugin", "plugins"):
-            plugin_dir = eng_dir / ".opencode" / dirname
-            plugin_dir.mkdir(parents=True, exist_ok=True)
-            (plugin_dir / "standard-hooks.js").write_text(body, encoding="utf-8")
+    from .client_rosters import ensure_opencode_plugin
+    ensure_opencode_plugin(agent_root, eng_dir / ".opencode")
     ensure_opencode_agents_link(agent_root, eng_dir / ".opencode")
     # Seed opencode.json with the project-level permission block REQUIRED for task
     # sub-agent dispatch to work headlessly (see _OPENCODE_PERMISSION); thinking options
@@ -3228,7 +3236,7 @@ _CLAUDE_EXTRA_ENV = (
 _SKIP_PERMISSION_ARGS = {
     "codex": "--dangerously-bypass-approvals-and-sandbox",
     "claude": "--dangerously-skip-permissions",
-    "opencode": "--dangerously-skip-permissions",
+    # OpenCode's flag depends on the installed major: opencode_launch.skip_permissions_argument.
     "kimi": "--auto",
 }
 _LEGACY_SKIP_PERMISSION_ARGS = {
@@ -3397,20 +3405,22 @@ def _write_launchers(
     # a trailing prompt seeds claude/codex. Provider keys come from the same env files
     # the launcher already sources for ORCHESTRATOR_BASE_URL.
     #
-    # `--agent operator` is REQUIRED for specialist dispatch to happen at all. With
-    # no `--agent`, OpenCode uses its built-in default primary "build" agent,
-    # which reads AGENTS.md as mere context and does every probe/analysis inline
-    # (the observed "0 specialist dispatches" bug — empty sessions/index.json).
-    # Our `operator` wrapper (.opencode/agent/operator.md) is rendered `mode: primary`
-    # precisely so this `--agent operator` launch is accepted; a `mode: subagent`
-    # entrypoint is silently rejected by OpenCode 1.17.5 (it falls back to "build").
-    # The operator-as-primary has the `task` tool and dispatches the subagent roster
-    # via `subagent_type: <role>` / `@<role>`, each loading its mandatory skill.
+    # Selecting the operator is REQUIRED for specialist dispatch to happen at all.
+    # Otherwise OpenCode uses its built-in default primary "build" agent, which
+    # reads AGENTS.md as mere context and does every probe/analysis inline (the
+    # observed "0 specialist dispatches" bug — empty sessions/index.json). Our
+    # `operator` wrapper (.opencode/agent/operator.md) is rendered `mode: primary`
+    # so it can be the entrypoint; OpenCode falls back to "build" for a subagent.
+    # OpenCode 1 takes `--agent operator`; OpenCode 2 has no `--agent` and reads
+    # the engagement opencode.json's `default_agent`. The launcher cannot know the
+    # installed major when it is written, so it reads `opencode --version` at run
+    # time and execs that major's flags (opencode_launch.launcher_exec_block).
     if client_kind in {"codex", "claude", "both"}:
+        from .opencode_launch import launcher_exec_block
+
         _write_launcher(
-            agent_root, eng_dir, "opencode",
-            _SKIP_PERMISSION_ARGS["opencode"] if skip_permissions else "",
-            exec_cmd="opencode --agent operator",
+            agent_root, eng_dir, "opencode", "",
+            exec_block=launcher_exec_block(skip_permissions),
             provider_key=CLIENT_PROVIDER_KEY["opencode"],
             workspace_root=workspace_root,
         )
@@ -3712,6 +3722,7 @@ def _write_launcher(
     *,
     exec_cmd: str | None = None,
     uninstructed_cmd: str | None = None,
+    exec_block: str | None = None,
     provider_key: str | None = None,
     extra_env: str = "",
     workspace_root: Path | None = None,
@@ -3738,7 +3749,11 @@ def _write_launcher(
     # client's own message flag — see CLIENT_MESSAGE_FLAGS / client_launch_argv).
     # An earlier launcher split "${@: -1}" off as the message, which silently handed
     # a flag VALUE (`--model x` → "x") to the model as its operator prompt.
-    if uninstructed_cmd:
+    if exec_block is not None:
+        # A client whose flags depend on the installed release supplies its own
+        # complete exec block (OpenCode: opencode_launch.launcher_exec_block).
+        exec_line = exec_block
+    elif uninstructed_cmd:
         # Goose alone needs two entrypoints: `goose run` refuses to start without an
         # instruction flag, `goose session` takes none. Route on the exact flag set
         # goose itself demands, so a bare launch opens a session instead of exiting 1.

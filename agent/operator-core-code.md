@@ -282,11 +282,15 @@ to `fuzz` is ready.
 optional only with exactly one active repository). It captures one immutable packet and returns a
 short `launch_message`: send only that to a fresh specialist with the registered role selected
 (`fork_turns: none` where exposed), never a second prompt carrying the packet contents. Proof work
-uses its `proof-work claim` receipt's `launch.launch_message` instead of `agent start`. Bind the
-native handle with `agent bind-client-handle` unless the task result's `Vigil dispatch binding:` line
-(OpenCode) reports `bound` or `already_bound`, and wait for the result in the current turn unless you
-have verified the client's background completion. After an interrupted return, inspect native task
-and command state before replacing work (ZCode: `docs/zcode-setup.md` **Interrupted specialists**).
+uses its `proof-work claim` receipt's `launch.launch_message` instead of `agent start`. On OpenCode 1
+launch with the `task` tool and `subagent_type`; on OpenCode 2 with the `subagent` tool and `agent`. Bind the
+native handle with `agent bind-client-handle` unless the `Vigil dispatch binding:` line reports `bound` or
+`already_bound` (OpenCode 1: in the `task` result; OpenCode 2: a separate Vigil note in this session), and
+wait for the result in the current turn unless you have verified the client's background completion.
+OpenCode 2 completes in the background: its `subagent` call returns at once and the child's result
+arrives later as a `<subagent …>` message, so act on that message, not the immediate return.
+After an interrupted return, inspect native task and command state before replacing work (ZCode:
+`docs/zcode-setup.md` **Interrupted specialists**).
 
 **What the helper renders.** The packet always opens, in this order, with Runtime Identity, the
 backend-derived Code Source Identity (never rebuild its generation, digest, snapshot, index, or ctags

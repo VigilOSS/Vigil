@@ -5,6 +5,34 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [Unreleased]
+
+### Changed
+
+- Vigil supports OpenCode 1.18.10 or newer, before 3.0. Every OpenCode start works on OpenCode 2:
+  web/code and Blue starts, generated `start_opencode.sh` launchers (which read the installed
+  version when they run) and remediation starts run the TUI `--standalone` and select the operator
+  through `default_agent`. A forwarded `--model` becomes the session's default and operator model,
+  its `#variant` is saved as the TUI's choice for that model, and `--dangerously-skip-permissions`
+  becomes `--auto`. `vigil engagement client-check --client opencode` accepts both version formats.
+- Vigil's OpenCode plugins load on OpenCode 2: specialists are bound to their dispatch, Vigil's
+  hooks run, shell commands keep the full Kali budget, and the `Vigil dispatch binding:` and
+  `Vigil dispatch status:` lines reach the operator as a Vigil note before the subagent's result.
+- OpenCode specialist roles and OpenCode's built-in `general` and `explore` subagents deny the
+  `question` tool, so a subagent cannot stall an unattended run on an unanswered question.
+- Engagements keep one copy of the standard OpenCode plugin.
+- A web/code OpenCode start that forwards `-c`/`--continue` or `-s`/`--session` reopens that
+  conversation without repeating the opening prompt.
+- Operator prompts describe OpenCode 2's `subagent` dispatch, whose result arrives later as a
+  `<subagent …>` message, and where its `Vigil dispatch binding:` line appears.
+
+### Fixed
+
+- `finding verify` with a CVSS vector given without its `CVSS:3.1/` prefix scores and bands it.
+- `kali browser` keeps its printed summary within 32 KiB and names each shortened result and
+  where the whole result is.
+- The `code-classify` obligation report's full-list command lists only system entries.
+
 ## [2.9.2] - 2026-11-16
 
 ### Fixed

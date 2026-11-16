@@ -321,10 +321,14 @@ def test_opencode_helper_path_finds_opencode_by_its_linked_name(context, monkeyp
     ["--model", "zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"],
     ["--model=zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"]])
 @pytest.mark.parametrize("version_output", ["opencode v2.3.0\n", "2.3.0"])
-def test_opencode_2_start_selects_the_operator_and_model_through_config(context, monkeypatch, arguments, version_output):
+def test_opencode_2_start_selects_the_operator_and_model_through_config(context, monkeypatch, tmp_path,
+                                                                       arguments, version_output):
     """OpenCode 2 TUIs take neither --agent nor --model, and a background service
     would not see the session environment, so the launch runs standalone."""
     root, engagement, _ = context
+    saved = tmp_path / "state/opencode/model.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"recent": [], "variant": {"zai-coding-plan/glm-5.3": "high"}}))
     original = clients.shutil.which
     monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
     monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout=version_output, stderr=""))
@@ -340,10 +344,38 @@ def test_opencode_2_start_selects_the_operator_and_model_through_config(context,
     assert "--dangerously-skip-permissions" not in argv
     assert "--prompt" in argv
     content = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
-    assert content == {"share": "disabled", "model": "zai-coding-plan/glm-5.3#max"}
+    assert content == {"share": "disabled", "model": "zai-coding-plan/glm-5.3#max",
+                       "agent": {"operator": {"model": "zai-coding-plan/glm-5.3#max"}}}
+    # The TUI's saved per-model choice outranks a configured variant.
+    assert json.loads(saved.read_text()) == {"recent": [], "variant": {"zai-coding-plan/glm-5.3": "max"}}
     workspace = Path(environment["VIGIL_CLIENT_CONTEXT"]).parent
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
     assert configuration["default_agent"] == "operator"
+
+
+@pytest.mark.parametrize("mode", ["web", "code"])
+@pytest.mark.parametrize("version_output", ["1.18.10", "opencode v2.3.0\n"])
+@pytest.mark.parametrize(("arguments", "focus"), [
+    (["-c"], None), (["--continue"], None), (["-s", "ses_acme"], None), (["--session", "ses_acme"], None),
+    (["--session=ses_acme"], None), (["-c", "--prompt", "check Acme's parser"], "check Acme's parser"),
+])
+def test_opencode_resume_sends_only_the_operator_focus(context, monkeypatch, mode, version_output,
+                                                        arguments, focus):
+    """A resumed session already ran its startup procedure; repeating the opening
+    would re-ask the source-trust question in a code session."""
+    root, engagement, _ = context
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout=version_output, stderr=""))
+    calls = []
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append((path, argv, env)))
+    engagements.start_engagement(root, engagement, "opencode", arguments, mode)
+    _, argv, _ = calls[0]
+    resume = [argument for argument in arguments if argument not in {"--prompt", focus}]
+    assert argv[argv.index(resume[0]):][:len(resume)] == resume
+    prompts = [argv[index + 1] for index, argument in enumerate(argv) if argument == "--prompt"]
+    assert prompts == ([focus] if focus else [])
 
 
 def test_native_helper_executes_docker_from_resolved_directory(context, monkeypatch):

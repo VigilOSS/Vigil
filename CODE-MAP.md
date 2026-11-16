@@ -187,6 +187,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   recorded replays from fresh mutations.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEY` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers and preflight consume them.
+- `src/vigil_cli/opencode_launch.py:LAUNCHER_MAJOR_PATTERN` is read alike by Python and `start_opencode.sh`.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses (never mtime).
 - `src/vigil_cli/runtime_images.py` owns immutable release pins and label validation; the release workflow embeds the pin.
 - `src/vigil_cli/mitmproxy.py` owns the proxy `docker build` argv and its inputs-digest label.
@@ -222,7 +223,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `src/vigil_cli/runtime.py:NUCLEI_TEMPLATES_DIR` (`/data/nuclei-templates`, kept across recreates) is where
   `provision_nuclei_templates` downloads templates on a fresh runtime and `kali nuclei --update-templates` refreshes them.
 - `agent/.opencode/plugin/assessment-hooks.js:resolveDispatch` binds an OpenCode specialist to its packet-verified dispatch
-  (`agent bind-client-handle`); `reportTask` appends `Vigil dispatch status:` (handoff, held leases, next commands).
+  (`agent bind-client-handle`); `statusReport` builds `Vigil dispatch status:` (handoff, held leases, next commands).
 - `agent/scripts/assess/lib/vocabulary.py:word_folder` mirrors `api/assessment.py:folded_vocabulary` (case and
   `-`/`_`/space ignored) for CLI status and label flags. See: `agent/scripts/assess/tests/test_cli_word_folding.py`.
 - `src/vigil_cli/engagements.py` owns offensive track creation, add-track, session mode validation, official-start

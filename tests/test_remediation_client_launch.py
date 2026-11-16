@@ -94,6 +94,23 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     assert not launch.engagement.exists()
 
 
+@pytest.mark.parametrize("version", ["opencode v2.3.0\n", "2.3.0\n"])
+def test_opencode_2_runs_its_own_server_so_the_remediation_command_applies(launch, monkeypatch, version):
+    # A background service would not see this launch's OPENCODE_CONFIG_CONTENT,
+    # so the /vigil-remediate command exists only in a standalone session.
+    def run(argv, **options):
+        launch.calls.append((argv, options))
+        return subprocess.CompletedProcess(argv, 0, version if argv[-1] == "--version" else "  --prompt string", "")
+
+    monkeypatch.setattr(launch.sessions.subprocess, "run", run)
+    assert start(launch, "opencode") == 0
+    argv, options = launch.calls[-1]
+    assert argv[:3] == ["opencode", "--standalone", "--prompt"]
+    assert str(launch.project["_profile_path"]) in argv[3]
+    config = json.loads(options["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["command"]["vigil-remediate"]["template"] == "Read the profile. $ARGUMENTS\n"
+
+
 def test_opencode_keeps_repository_claude_context_discoverable(launch, monkeypatch):
     # OpenCode's Claude Code switches also skip the repository's own CLAUDE.md and
     # .claude/skills, so remediation leaves that compatibility as the owner set it.
@@ -137,7 +154,8 @@ def test_unsupported_session_policy_fails_before_probe_or_mutation(launch, clien
     assert not launch.engagement.exists()
 
 
-@pytest.mark.parametrize("version,help_output", [("0.9.0", "--prompt text"), ("2.0.0", "--prompt text"), ("1.18.10", "--model text")])
+@pytest.mark.parametrize("version,help_output", [("0.9.0", "--prompt text"), ("1.18.9", "--prompt text"),
+                                                  ("opencode v3.0.0", "--prompt text"), ("1.18.10", "--model text")])
 def test_opencode_refuses_unverified_version_or_missing_prompt_before_launch(launch, monkeypatch, version, help_output):
     def run(argv, **options):
         launch.calls.append((argv, options))

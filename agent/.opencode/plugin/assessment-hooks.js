@@ -16,8 +16,9 @@ const FINAL_HANDOFF = new Set(["ready", "blocked"])
 const shellWord = value => /^[A-Za-z0-9_./:=@%+,-]+$/.test(String(value)) ? String(value)
   : `'${String(value).replace(/'/g, `'\\''`)}'`
 
-export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT,
-  activityTimeoutMs = 60000}) => {
+// Everything below is independent of the native host API; each major's adapter
+// supplies the native session, message and tool-catalog reads.
+const runtime = ({bindingPath, activityTimeoutMs}) => {
   const states = new Map()
   const readContext = () => {
     if (!bindingPath) throw new Error("No native Vigil context binding")
@@ -91,31 +92,6 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     `Client context: ${JSON.stringify(bindingPath)}. Treat environment-variable artifact paths as literal paths from this binding.`,
     `Read ${JSON.stringify(join(context.workspace, "AGENTS.md"))} for this task's immutable workflow router. Resolve every agent/... path against ${JSON.stringify(context.agent_root)}.`,
   ].join("\n")
-  const request = async sessionID => {
-    const response = await client.session.messages({path: {id: sessionID}})
-    if (response.error || !Array.isArray(response.data)) throw new Error("Native messages unavailable")
-    const session = await client.session.get({path: {id: sessionID}})
-    if (session.error || !session.data || session.data.id !== sessionID) throw new Error("Native session unavailable")
-    let messages = response.data.slice().sort((a, b) =>
-      (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0) || String(a.info?.id).localeCompare(String(b.info?.id)))
-    const boundary = session.data.revert?.messageID
-    if (boundary) {
-      const index = messages.findIndex(message => message.info?.id === boundary)
-      if (index < 0) throw new Error("Native revert boundary unavailable")
-      // The current unfinished request is created after the active revert and is
-      // still needed for attribution. Historical summaries beyond it are not.
-      const current = messages.filter(message => message.info?.role === "assistant" && !message.info?.finish && !message.info?.error)
-      messages = [...messages.slice(0, index), ...current]
-    }
-    const assistants = messages.filter(message => message.info?.role === "assistant")
-    const pending = [...new Map(assistants.filter(message => !message.info.finish && !message.info.error)
-      .map(message => [message.info.id, message.info])).values()]
-    const current = pending.length === 1 ? pending[0] : null
-    if (!current || current.sessionID !== sessionID)
-      throw new Error("Current unfinished assistant cannot be correlated")
-    return {current, messages, boundary: boundary || null, parentID: session.data.parentID,
-      directory: session.data.directory}
-  }
   // A native task child names its dispatch only through the launch message's
   // content-addressed packet path. The packet's leading Runtime Identity names
   // the dispatch, and the backend row must agree before the handle is bound.
@@ -146,19 +122,16 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
       throw new Error("Dispatch packet has no Runtime Identity")
     return fields
   }
-  const resolveDispatch = async (context, session, native, attempts) => {
-    const launch = native.messages.find(message => message.info?.role === "user")
-    const text = (launch?.parts || []).filter(part => part?.type === "text").map(part => String(part.text)).join("\n")
-    const packets = [...new Set([...text.matchAll(PACKET_REFERENCE)].map(match => `${match[1]}/${match[2]}`))]
+  // `launch` is the task's launch text plus the native agent/model observed `at` it.
+  const resolveDispatch = async (context, session, launch, attempts) => {
+    const packets = [...new Set([...launch.text.matchAll(PACKET_REFERENCE)].map(match => `${match[1]}/${match[2]}`))]
     if (packets.length !== 1)
       return packets.length ? {status: "unresolved", reason: "ambiguous_dispatch_packets", packets, advisories: []}
         : {status: "unresolved", reason: "no_dispatch_packet", advisories: []}
     const [id, sha256] = packets[0].split("/")
-    const info = native.current
     const record = {dispatch_id: Number(id), packet_sha256: sha256, handle: session,
-      session_namespace: native.directory || context.project || context.workspace,
-      native_agent: info.agent || "unknown", model: `${info.providerID}/${info.modelID}`,
-      variant: info.variant || "default"}
+      session_namespace: launch.directory || context.project || context.workspace,
+      native_agent: launch.agent || "unknown", model: launch.model, variant: launch.variant || "default"}
     let identity
     try { identity = packetIdentity(context, id, sha256) } catch (error) {
       return {...record, status: "unresolved", reason: "packet_unverified", detail: error.message, advisories: []}
@@ -184,7 +157,7 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     if (current) return outcome({status: "unresolved", reason: "dispatch_bound_elsewhere",
       advisories: [{advisory: "dispatch_already_bound", ...reference, handle: session,
         bound_client: current.asserted_client, bound_handle: current.asserted_client_handle}]})
-    const note = `Recorded by the Vigil OpenCode plugin at native task session ${session}'s first request `
+    const note = `Recorded by the Vigil OpenCode plugin at native task session ${session}'s ${launch.at} `
       + `(dispatch packet ${sha256}). Observed native agent ${record.native_agent}, model ${record.model}, `
       + `variant ${record.variant}.` + (mismatch.length ? ` The native agent differs from registered role ${record.registered_role}.` : "")
     try {
@@ -195,32 +168,26 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
       return outcome({status: "failed", reason: "helper_failed", detail: failure(error), attempts: attempts + 1})
     }
   }
-  const dispatchFor = async (context, session, native) => {
+  const dispatchFor = async (context, session, launch) => {
     const previous = await dispatches.get(session)
     if (previous && !(previous.status === "failed" && previous.attempts < BIND_ATTEMPTS)) return previous
-    const pending = resolveDispatch(context, session, native, previous?.attempts || 0).catch(error =>
+    const pending = resolveDispatch(context, session, launch, previous?.attempts || 0).catch(error =>
       ({status: "failed", reason: "plugin_error", detail: failure(error), attempts: (previous?.attempts || 0) + 1, advisories: []}))
     dispatches.set(session, pending)
     const record = await pending
     if (record.status === "failed") console.error(`[vigil] Dispatch binding for ${session} failed: ${record.detail}`)
     return record
   }
-  // The operator sees the task result, never the child's system prompt.
-  const reportDispatch = async (output, record) => {
-    if (record.reason === "no_dispatch_packet" || record.reported) return
-    record.reported = true
+  // The operator sees the task's return, never the child's system prompt. The
+  // caller marks the record reported once the line has been delivered.
+  const bindingReport = record => {
+    if (record.reason === "no_dispatch_packet" || record.reported) return null
     const {reported, attempts, ...shown} = record
-    output.output = `${output.output ?? ""}\n\nVigil dispatch binding: ${JSON.stringify(shown)}`
+    return `Vigil dispatch binding: ${JSON.stringify(shown)}`
       + (["bound", "already_bound"].includes(record.status)
         ? "\nThis handle is recorded; run `agent bind-client-handle` only to correct it." : "")
   }
   const vigilCommand = (context, ...args) => [context.vigil_cli, "assess", ...args].map(shellWord).join(" ")
-  // The same reading OpenCode's renderer applies to a task result.
-  const taskResultEmpty = text => {
-    const value = String(text ?? "")
-    const wrapped = /<task_result>\s*([\s\S]*?)\s*<\/task_result>/.exec(value)
-    return !(wrapped ? wrapped[1] : value.split("\n").filter(line => !line.startsWith("task_id:")).join("\n")).trim()
-  }
   // A missing handoff is a failed point read that `render-handoff` confirms with
   // its documented exit 2; any other failure leaves the handoff unverified.
   const readHandoff = async (context, agentId) => {
@@ -286,14 +253,9 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
       ...(page ? {held_leases: held, leases, ...(held > leases.length ? {leases_omitted: held - leases.length} : {})} : {}),
       next}
   }
-  const reportTask = async output => {
-    const session = output?.metadata?.sessionId
-    if (typeof session !== "string" || !dispatches.has(session)) return
-    const record = await dispatches.get(session)
-    const empty = taskResultEmpty(output.output)
-    await reportDispatch(output, record)
-    // Only a packet-verified dispatch is checked: its agent_id came from the digest-checked packet.
-    if (!record.agent_id || !(["bound", "already_bound", "failed"].includes(record.status) || empty)) return
+  // Only a packet-verified dispatch is checked: its agent_id came from the digest-checked packet.
+  const statusReport = async (record, empty) => {
+    if (!record.agent_id || !(["bound", "already_bound", "failed"].includes(record.status) || empty)) return null
     let status
     try { status = await dispatchStatus(readContext(), record, empty) } catch (error) {
       status = {agent_id: record.agent_id, dispatch_id: record.dispatch_id, empty_result: empty,
@@ -301,29 +263,7 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
           ["vigil", "assess", "agent", "render-handoff", record.agent_id],
           ["vigil", "assess", ...leaseRead(record.agent_id)]].map(words => words.map(shellWord).join(" "))}
     }
-    if (status) output.output = `${output.output ?? ""}\n\nVigil dispatch status: ${JSON.stringify(status)}`
-  }
-  const toolName = tool => ({bash: "Bash", read: "Read", write: "Write", edit: "Edit",
-    task: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}[tool] || tool)
-  const nativeToolName = async tool => {
-    if (toolName(tool) !== tool) return toolName(tool)
-    // The public SDK exposes connected MCP servers and the built-in/custom
-    // registry separately. Do not classify arbitrary underscore names as MCP.
-    let timer
-    try {
-      const [servers, local] = await Promise.race([
-        Promise.all([client.mcp.status(), client.tool.ids()]),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Native tool catalog timeout")), 1000) }),
-      ])
-      if (servers.error || local.error || !servers.data || !Array.isArray(local.data))
-        throw new Error("Native tool catalog unavailable")
-      if (!local.data.includes(tool) && Object.entries(servers.data).some(([server, status]) =>
-        status.status === "connected" && tool.startsWith(server.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")))
-        return "mcp__" + tool
-    } catch (error) {
-      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
-    } finally { clearTimeout(timer) }
-    return tool
+    return status ? `Vigil dispatch status: ${JSON.stringify(status)}` : null
   }
   // Activity rows are written off the tool's path, one at a time, so a loaded
   // host neither stalls the native event loop nor fans out shell hooks. The
@@ -386,6 +326,137 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     }).finally(() => queued.delete(write)).catch(error => keepUnconfirmed(context, payload, write.body, error))
       .catch(error => console.error(`[vigil] Native activity accounting failed: ${error.message}`))
   }
+  // Extends a native summary request with the preservation contract.
+  const compacting = (session, push) => {
+    try {
+      const context = readContext()
+      const contract = hook(context, "pre-compact.sh", {hook_event_name: "PreCompact", trigger: "native"})
+      if (!contract.trim()) throw new Error("Empty compaction contract")
+      push(contract)
+      observe(context, session, {compacting_observed: true, recovery_pending: true})
+    } catch (error) {
+      push(`Vigil preservation unavailable: ${error.message}. Restore canonical backend state before continuing.`)
+    }
+  }
+  // One request's context. `native` names the request's agent, its parent, an active
+  // revert boundary, the latest visible native summary, and how to read the task's launch.
+  const restore = async (context, session, native, push) => {
+    push(pointers(context))
+    const row = state(context, session)
+    if (Object.hasOwn(row, "revert_boundary") && row.revert_boundary !== native.boundary) {
+      row.last_summary_id = null
+      row.recovery_pending = false
+      row.revert_boundary = native.boundary
+    }
+    row.revert_boundary = native.boundary
+    if (native.agent !== "operator" || native.parentID) {
+      push("Restore only this specialist's assigned role, mandatory constraints, and active ownership after a context boundary; never load an operator core.")
+      if (native.parentID) {
+        const dispatch = await dispatchFor(context, session, native.launch())
+        for (const advisory of dispatch.advisories.filter(item => item.advisory === "native_agent_role_mismatch"))
+          push(`Vigil advisory: ${JSON.stringify(advisory)}\nThis task runs as native agent `
+            + `${JSON.stringify(advisory.native_agent)}, but its dispatch packet registers ${advisory.registered_role}. `
+            + `Follow the packet's Runtime Identity: read ${JSON.stringify(join(context.agent_root, "agents", advisory.registered_role + ".md"))} `
+            + "and its required references; the native agent's own instructions do not change your role.")
+      }
+      return
+    }
+    if (native.summary) {
+      const resume = hook(context, "post-compact-resume.sh", {hook_event_name: "SessionStart", source: "compact"})
+      if (!resume.trim()) throw new Error("Recovery context is unavailable")
+      push(`Standing recovery contract for native summary ${native.summary}: apply the following once if hydration for this exact summary is not already completed in the current native tool history. Do not restart hydration already completed in this continuation.\n` + resume)
+      observe(context, session, {last_summary_id: native.summary, context_injected: true,
+        recovery_pending: false, revert_boundary: native.boundary})
+    } else if (row.recovery_pending) {
+      throw new Error("Compaction is pending but its successful summary is not visible")
+    } else {
+      observe(context, session, {request_observed: true, revert_boundary: native.boundary})
+    }
+  }
+  const unverified = error => `Vigil context could not be verified: ${error.message}. STOP dependent work and use the bound helper to restore the selected workflow; do not infer state from a summary.`
+  return {readContext, state, observe, dispatches, dispatchFor, bindingReport, statusReport, writeActivity,
+    compacting, restore, unverified}
+}
+
+// OpenCode 1.x: a `server` plugin whose client reads the session's full message history.
+export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT,
+  activityTimeoutMs = 60000}) => {
+  const {readContext, dispatches, bindingReport, statusReport, writeActivity, compacting, restore, unverified}
+    = runtime({bindingPath, activityTimeoutMs})
+  const request = async sessionID => {
+    const response = await client.session.messages({path: {id: sessionID}})
+    if (response.error || !Array.isArray(response.data)) throw new Error("Native messages unavailable")
+    const session = await client.session.get({path: {id: sessionID}})
+    if (session.error || !session.data || session.data.id !== sessionID) throw new Error("Native session unavailable")
+    let messages = response.data.slice().sort((a, b) =>
+      (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0) || String(a.info?.id).localeCompare(String(b.info?.id)))
+    const boundary = session.data.revert?.messageID
+    if (boundary) {
+      const index = messages.findIndex(message => message.info?.id === boundary)
+      if (index < 0) throw new Error("Native revert boundary unavailable")
+      // The current unfinished request is created after the active revert and is
+      // still needed for attribution. Historical summaries beyond it are not.
+      const current = messages.filter(message => message.info?.role === "assistant" && !message.info?.finish && !message.info?.error)
+      messages = [...messages.slice(0, index), ...current]
+    }
+    const assistants = messages.filter(message => message.info?.role === "assistant")
+    const pending = [...new Map(assistants.filter(message => !message.info.finish && !message.info.error)
+      .map(message => [message.info.id, message.info])).values()]
+    const current = pending.length === 1 ? pending[0] : null
+    if (!current || current.sessionID !== sessionID)
+      throw new Error("Current unfinished assistant cannot be correlated")
+    return {current, messages, boundary: boundary || null, parentID: session.data.parentID,
+      directory: session.data.directory}
+  }
+  // A native task names its dispatch in the child's first user message.
+  const launchOf = native => {
+    const launch = native.messages.find(message => message.info?.role === "user")
+    const info = native.current
+    return {text: (launch?.parts || []).filter(part => part?.type === "text").map(part => String(part.text)).join("\n"),
+      directory: native.directory, agent: info.agent, model: `${info.providerID}/${info.modelID}`,
+      variant: info.variant, at: "first request"}
+  }
+  // The same reading OpenCode's renderer applies to a task result.
+  const taskResultEmpty = text => {
+    const value = String(text ?? "")
+    const wrapped = /<task_result>\s*([\s\S]*?)\s*<\/task_result>/.exec(value)
+    return !(wrapped ? wrapped[1] : value.split("\n").filter(line => !line.startsWith("task_id:")).join("\n")).trim()
+  }
+  const reportTask = async output => {
+    const session = output?.metadata?.sessionId
+    if (typeof session !== "string" || !dispatches.has(session)) return
+    const record = await dispatches.get(session)
+    const empty = taskResultEmpty(output.output)
+    const binding = bindingReport(record)
+    if (binding) {
+      record.reported = true
+      output.output = `${output.output ?? ""}\n\n${binding}`
+    }
+    const status = await statusReport(record, empty)
+    if (status) output.output = `${output.output ?? ""}\n\n${status}`
+  }
+  const toolName = tool => ({bash: "Bash", read: "Read", write: "Write", edit: "Edit",
+    task: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}[tool] || tool)
+  const nativeToolName = async tool => {
+    if (toolName(tool) !== tool) return toolName(tool)
+    // The public SDK exposes connected MCP servers and the built-in/custom
+    // registry separately. Do not classify arbitrary underscore names as MCP.
+    let timer
+    try {
+      const [servers, local] = await Promise.race([
+        Promise.all([client.mcp.status(), client.tool.ids()]),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Native tool catalog timeout")), 1000) }),
+      ])
+      if (servers.error || local.error || !servers.data || !Array.isArray(local.data))
+        throw new Error("Native tool catalog unavailable")
+      if (!local.data.includes(tool) && Object.entries(servers.data).some(([server, status]) =>
+        status.status === "connected" && tool.startsWith(server.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")))
+        return "mcp__" + tool
+    } catch (error) {
+      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
+    } finally { clearTimeout(timer) }
+    return tool
+  }
   const log = async (input, output, failed = false) => {
     try {
       const context = readContext()
@@ -418,62 +489,218 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
         await log({tool: part.tool, sessionID: part.sessionID, callID: part.callID, args: part.state.input},
           {error: part.state.error}, true)
     },
-    "experimental.session.compacting": async (input, output) => {
+    "experimental.session.compacting": async (input, output) =>
+      compacting(input.sessionID, text => output.context.push(text)),
+    "experimental.chat.system.transform": async (input, output) => {
       try {
         const context = readContext()
-        const contract = hook(context, "pre-compact.sh", {hook_event_name: "PreCompact", trigger: "native"})
-        if (!contract.trim()) throw new Error("Empty compaction contract")
-        output.context.push(contract)
-        observe(context, input.sessionID, {compacting_observed: true, recovery_pending: true})
-      } catch (error) {
-        output.context.push(`Vigil preservation unavailable: ${error.message}. Restore canonical backend state before continuing.`)
-      }
-    },
-    "experimental.chat.system.transform": async (input, output) => {
-      let context
-      try {
-        context = readContext()
         const native = await request(input.sessionID)
         const info = native.current
         // This callback also runs for the summarizer with the same sessionID.
         if (info.agent === "compaction" || info.mode === "compaction" || info.summary) return
         if (input.model && (info.providerID !== input.model.providerID || info.modelID !== input.model.id))
           throw new Error("Native request model correlation is ambiguous")
-        output.system.push(pointers(context))
-        const row = state(context, input.sessionID)
-        if (Object.hasOwn(row, "revert_boundary") && row.revert_boundary !== native.boundary) {
-          row.last_summary_id = null
-          row.recovery_pending = false
-          row.revert_boundary = native.boundary
-        }
-        row.revert_boundary = native.boundary
-        const summary = native.messages.filter(message => message.info?.summary && message.info?.finish && !message.info?.error).at(-1)?.info
-        if (info.agent !== "operator" || native.parentID) {
-          output.system.push("Restore only this specialist's assigned role, mandatory constraints, and active ownership after a context boundary; never load an operator core.")
-          if (native.parentID) {
-            const dispatch = await dispatchFor(context, input.sessionID, native)
-            for (const advisory of dispatch.advisories.filter(item => item.advisory === "native_agent_role_mismatch"))
-              output.system.push(`Vigil advisory: ${JSON.stringify(advisory)}\nThis task runs as native agent `
-                + `${JSON.stringify(advisory.native_agent)}, but its dispatch packet registers ${advisory.registered_role}. `
-                + `Follow the packet's Runtime Identity: read ${JSON.stringify(join(context.agent_root, "agents", advisory.registered_role + ".md"))} `
-                + "and its required references; the native agent's own instructions do not change your role.")
-          }
-          return
-        }
-        if (summary) {
-          const resume = hook(context, "post-compact-resume.sh", {hook_event_name: "SessionStart", source: "compact"})
-          if (!resume.trim()) throw new Error("Recovery context is unavailable")
-          output.system.push(`Standing recovery contract for native summary ${summary.id}: apply the following once if hydration for this exact summary is not already completed in the current native tool history. Do not restart hydration already completed in this continuation.\n` + resume)
-          observe(context, input.sessionID, {last_summary_id: summary.id, context_injected: true,
-            recovery_pending: false, revert_boundary: native.boundary})
-        } else if (row.recovery_pending) {
-          throw new Error("Compaction is pending but its successful summary is not visible")
-        } else {
-          observe(context, input.sessionID, {request_observed: true, revert_boundary: native.boundary})
-        }
+        await restore(context, input.sessionID, {agent: info.agent, parentID: native.parentID, boundary: native.boundary,
+          summary: native.messages.filter(message => message.info?.summary && message.info?.finish && !message.info?.error).at(-1)?.info?.id,
+          launch: () => launchOf(native)}, text => output.system.push(text))
       } catch (error) {
-        output.system.push(`Vigil context could not be verified: ${error.message}. STOP dependent work and use the bound helper to restore the selected workflow; do not infer state from a summary.`)
+        output.system.push(unverified(error))
       }
     },
   }
+}
+
+// OpenCode 2.x: hooks registered through the plugin context. Names follow the 2.x plugin
+// API (ToolHooks, SessionHooks); an unknown name would register and never fire.
+const V2_HOOKS = [["tool", "execute.after"], ["session", "prompt"], ["session", "context"],
+  ["session", "compaction"], ["session", "experimental.idle"]]
+const V2_EVENTS = ["session.revert.committed"]
+const V2_TOOL_NAMES = {shell: "Bash", read: "Read", write: "Write", edit: "Edit", patch: "apply_patch",
+  subagent: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}
+// Message kinds that show a child has already started its conversation.
+const CONVERSATION = new Set(["user", "synthetic", "assistant", "compaction", "shell", "skill"])
+const isObject = value => typeof value === "object" && value !== null && !Array.isArray(value)
+
+// Registers the 2.x hooks, routing each to `invoke(key, event)`; every callback contains its
+// own failure, because a rejected 2.x hook fails the native operation it belongs to.
+export const registerV2Hooks = async (ctx, invoke) => {
+  // OpenCode 2 ignores the 1.x launch's default shell budget; give a call that names no
+  // timeout the same budget. Shell timeouts are milliseconds; background commands keep none.
+  const budget = Number(process.env.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS)
+  if (Number.isSafeInteger(budget) && budget > 0)
+    await ctx.tool.hook("execute.before", event => {
+      try {
+        if (event.tool !== "shell" || !isObject(event.input) || event.input.timeout !== undefined
+            || event.input.background === true) return
+        event.input = {...event.input, timeout: budget}
+      } catch (error) { console.error(`[vigil] Default shell timeout was not applied: ${error.message}`) }
+    })
+  for (const [domain, name] of V2_HOOKS)
+    await ctx[domain].hook(name, async event => {
+      try { await invoke(`${domain}.${name}`, event) }
+      catch (error) { console.error(`[vigil] ${domain}.${name} hook failed: ${error.message}`) }
+    })
+  const stop = new AbortController()
+  ;(async () => {
+    for await (const event of ctx.event.subscribe({types: V2_EVENTS, signal: stop.signal})) {
+      if (!V2_EVENTS.includes(event?.type)) continue
+      try { await invoke(event.type, event) }
+      catch (error) { console.error(`[vigil] ${event.type} handling failed: ${error.message}`) }
+    }
+  })().catch(error => { if (!stop.signal.aborted) console.error(`[vigil] Native event stream ended: ${error.message}`) })
+  return () => stop.abort()
+}
+
+export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIGIL_CLIENT_CONTEXT,
+  activityTimeoutMs = 60000}) => {
+  const {readContext, state, observe, dispatches, dispatchFor, bindingReport, statusReport, writeActivity,
+    compacting, restore, unverified} = runtime({bindingPath, activityTimeoutMs})
+  const system = event => text => event.system.push({type: "text", text})
+  const session = async sessionID => {
+    const info = await ctx.session.get({sessionID})
+    if (info?.id !== sessionID) throw new Error("Native session unavailable")
+    return info
+  }
+  // The session's messages from its latest completed compaction on.
+  const history = async sessionID => {
+    const messages = await ctx.session.context({sessionID})
+    if (!Array.isArray(messages)) throw new Error("Native messages unavailable")
+    return messages
+  }
+  const launches = new Map()
+  const launchOf = (info, text, model, at) => ({text: String(text ?? ""), directory: info.location?.directory,
+    agent: info.agent, model: model ? `${model.providerID}/${model.id}` : "unknown", variant: model?.variant, at})
+  const nativeToolName = async tool => {
+    if (V2_TOOL_NAMES[tool]) return V2_TOOL_NAMES[tool]
+    // An MCP tool is registered under its server's normalized name as namespace.
+    let timer
+    try {
+      const [servers, tools] = await Promise.race([
+        Promise.all([ctx.mcp.list(), ctx.tool.list()]),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Native tool catalog timeout")), 1000) }),
+      ])
+      if (!Array.isArray(servers?.data) || !Array.isArray(tools)) throw new Error("Native tool catalog unavailable")
+      const namespace = tools.find(entry => entry?.id === tool)?.options?.namespace
+      if (namespace && servers.data.some(server => server?.status?.status === "connected"
+          && String(server.name).replace(/[^a-zA-Z0-9_-]/g, "_") === namespace)) return "mcp__" + tool
+    } catch (error) {
+      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
+    } finally { clearTimeout(timer) }
+    return tool
+  }
+  const toolInput = (tool, input) => ["write", "edit"].includes(tool) ? {...input, file_path: input.file_path ?? input.path}
+    : tool === "subagent" ? {...input, subagent_type: input.agent}
+      : tool === "patch" ? {...input, command: input.patchText} : input
+  const resultText = result => typeof result.output === "string" ? result.output
+    : typeof result.output?.output === "string" ? result.output.output
+      : (Array.isArray(result.content) ? result.content : []).filter(part => part?.type === "text")
+        .map(part => String(part.text)).join("\n")
+  const log = async event => {
+    try {
+      const context = readContext()
+      const name = await nativeToolName(event.tool)
+      let response
+      if (event.status === "error") {
+        const error = isObject(event.error) ? {...event.error, message: event.error.message} : event.error
+        response = {error, stderr: String(event.error?.message || event.error || "Native tool failed"), exit_code: 1}
+      } else {
+        const result = isObject(event.result) ? event.result : {}
+        const structured = isObject(result.output) ? result.output : {}
+        response = {...result, ...structured, ...(isObject(result.metadata) ? result.metadata : {}), output: resultText(result)}
+        const exit = structured.exitCode ?? result.metadata?.exit
+        if (event.tool === "shell" && exit !== undefined && exit !== null) response.exit_code = exit
+      }
+      if (name.startsWith("mcp__")) response.output = JSON.stringify(response)
+      writeActivity(context, {hook_event_name: "PostToolUse", client_name: "opencode",
+        session_id: event.sessionID, tool_use_id: event.id, agent_type: event.agent || "unknown",
+        tool_name: name, native_tool_name: event.tool,
+        tool_input: toolInput(event.tool, isObject(event.input) ? event.input : {}), tool_response: response})
+    } catch (error) { console.error(`[vigil] Native activity was not recorded: ${error.message}`) }
+  }
+  return {
+    "tool.execute.after": log,
+    // A child's launch prompt names its dispatch packet before the child runs. The
+    // subagent call is not held for the backend; the child's first request awaits it.
+    "session.prompt": async event => {
+      try {
+        if (dispatches.has(event.sessionID)) return
+        const info = await session(event.sessionID)
+        if (!info.parentID) return
+        if ((await history(event.sessionID)).some(message => CONVERSATION.has(message?.type))) return
+        const context = readContext()
+        const launch = launchOf(info, event.prompt?.text, info.model, "launch prompt")
+        launches.set(event.sessionID, launch)
+        dispatchFor(context, event.sessionID, launch).catch(() => {})
+      } catch (error) { console.error(`[vigil] Dispatch launch of ${event.sessionID} was not observed: ${error.message}`) }
+    },
+    "session.context": async event => {
+      try {
+        const context = readContext()
+        const info = await session(event.sessionID)
+        let messages = await history(event.sessionID)
+        // A staged revert hides its boundary and everything after it; a boundary before
+        // the latest compaction hides that compaction too.
+        const boundary = info.revert?.messageID || null
+        if (boundary) {
+          const index = messages.findIndex(message => message?.id === boundary)
+          messages = index < 0 ? [] : messages.slice(0, index)
+        }
+        const compacted = messages.filter(message => message?.type === "compaction")
+        await restore(context, event.sessionID, {agent: event.agent, parentID: info.parentID, boundary,
+          summary: compacted.filter(message => message.status === "completed").at(-1)?.id,
+          // A launch observed in an earlier process is still the child's first message until it compacts.
+          launch: () => launches.get(event.sessionID) ?? launchOf(info,
+            compacted.length ? "" : messages.find(message => message?.type === "user")?.text, event.model, "first request"),
+        }, system(event))
+      } catch (error) {
+        system(event)(unverified(error))
+      }
+    },
+    "session.compaction": async event => compacting(event.sessionID, system(event)),
+    // The subagent tool returns at once, so the report OpenCode 1 appended to the task
+    // result goes to the operator's session as a note that does not wake it: it is read
+    // with the <subagent> report that follows this child going idle.
+    "session.experimental.idle": async event => {
+      try {
+        const pending = dispatches.get(event.sessionID)
+        if (!pending) return
+        // The child's own shell or subagent wakes it again; report once that work is done.
+        if ((event.background || []).some(item => item?.sessionID === event.sessionID)) return
+        const record = await pending
+        const info = await session(event.sessionID)
+        if (!info.parentID) return
+        const last = (await history(event.sessionID)).filter(message => message?.type === "assistant").at(-1)
+        const empty = !(last?.content || []).some(part => part?.type === "text" && String(part.text ?? "").trim())
+        const binding = bindingReport(record)
+        const lines = [binding, await statusReport(record, empty)].filter(Boolean)
+        if (!lines.length) return
+        await ctx.session.synthetic({sessionID: info.parentID, text: lines.join("\n\n"),
+          description: "Vigil dispatch report", metadata: {source: "vigil", childID: event.sessionID},
+          resume: false})
+        if (binding) record.reported = true
+      } catch (error) {
+        console.error(`[vigil] Vigil dispatch report for ${event.sessionID} was not delivered: ${error.message}`)
+      }
+    },
+    // A committed revert removes the messages after its boundary, a pending summary included.
+    "session.revert.committed": async event => {
+      try {
+        const sessionID = event.data?.sessionID
+        if (typeof sessionID !== "string") return
+        const context = readContext()
+        const row = state(context, sessionID)
+        if (row.recovery_pending || row.last_summary_id)
+          observe(context, sessionID, {last_summary_id: null, recovery_pending: false})
+      } catch (error) { console.error(`[vigil] Revert was not applied to recovery state: ${error.message}`) }
+    },
+  }
+}
+
+export default {
+  id: "vigil-assessment-hooks",
+  server: VigilAssessmentHooks,
+  setup: async ctx => {
+    const adapter = await VigilAssessmentHooksV2({ctx})
+    return registerV2Hooks(ctx, (key, event) => adapter[key](event))
+  },
 }

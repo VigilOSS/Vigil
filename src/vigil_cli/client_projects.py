@@ -125,11 +125,13 @@ def forwarding_assets(agent: Path, client: str) -> dict[str, bytes]:
         for path in sorted((agent / f".{client}/assessment" / kind).glob("*.md")):
             name = path.stem
             header = path.read_text().split("---", 2)[1]
-            description = next(line for line in header.splitlines() if line.startswith("description:"))
-            frontmatter = f"---\nname: {name}\n{description}\n"
             if kind == "agents":
-                frontmatter += ("injectAgentsMd: false\n" if client == "zcode" else
-                    "mode: primary\n" if name == "operator" else "mode: subagent\n")
+                # Native discovery reads this stub, so it carries the rendered role's
+                # frontmatter (mode, injectAgentsMd, permission) unchanged.
+                frontmatter = "---" + header
+            else:
+                description = next(line for line in header.splitlines() if line.startswith("description:"))
+                frontmatter = f"---\nname: {name}\n{description}\n"
             target = f"{kind}/{name}.md"
             files[target] = (frontmatter + "---\n\n"
                 "Use the immutable client context and absolute Vigil helper supplied by the native hook "

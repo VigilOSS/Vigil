@@ -185,8 +185,22 @@ on any batched-tool turn.
 vigil engagement start <key> --client opencode
 ```
 
-The launcher execs opencode's **default TUI** as `--agent operator`, not the
-one-shot `opencode run`. The operator message is passed with `--prompt`.
+Vigil supports OpenCode 1.18.10 or newer, before 3.0; `vigil engagement client-check --client
+opencode` reports the installed version. The launch execs OpenCode's **default TUI**, not the
+one-shot `opencode run`, as the `operator` agent, and passes the operator message with `--prompt`.
+OpenCode 1 selects the operator with `--agent operator`. OpenCode 2 has no `--agent` flag: the
+session config's `default_agent` selects the operator, and the TUI runs `--standalone`, with its
+own server, so that server inherits the session's environment and config. The generated
+`start_opencode.sh` reads `opencode --version` each time it runs and passes the installed major's
+flags. On OpenCode 2 a forwarded `--dangerously-skip-permissions` is passed as `--auto`.
+
+To reopen an earlier OpenCode conversation, forward OpenCode's own flag:
+`vigil engagement start <key> --client opencode -- -c` continues the latest conversation, and
+`-- -s <session-id>` a chosen one. A web/code session runs in the engagement's
+`clients/opencode/<mode>` folder; `opencode session list` run there prints its ids. A web/code resume
+sends no opening prompt, only a forwarded `--prompt`. OpenCode 2 opens a new conversation for an
+unknown id, so check the id first or run `/vigil-resume` in that conversation. Vigil's progress lives in the backend, so a
+new conversation on the same engagement reloads it either way.
 
 For web/code, select the provider and model natively; Vigil does not require a
 DeepSeek key or force assessment specialist models. To use Z.AI Coding Plan,
@@ -196,36 +210,44 @@ Generated assessment roles inherit the selected model. Installed role files do
 not prove that a particular specialist was dispatched successfully. Choose the
 reasoning variant at start with the model, for example
 `vigil engagement start <key> --client opencode --mode code -- --model=zai-coding-plan/glm-5.3#max`.
-The TUI takes a new conversation's variant only from the choice it saves per
-model for every session on the machine, so Vigil passes the model without
-`#max` and saves `max` as that model's choice before the TUI starts, as the
-TUI's variant picker does. Without `#<variant>`, the saved choice applies. Each
-message keeps the variant it was sent with and specialists inherit the variant
+OpenCode 1 receives `--model` without `#max`. OpenCode 2 has no `--model` flag, so Vigil adds the
+model to the session's `OPENCODE_CONFIG_CONTENT` as the default model and as the `operator`
+agent's model, which outranks a model pinned in the operator's role file as `--model` does on
+OpenCode 1. On both majors the TUI takes a new conversation's variant only from the choice it
+saves per model for every session on the machine, so Vigil saves `max` as that model's choice
+before the TUI starts, as the TUI's variant picker does. Without `#<variant>`, the saved choice
+applies. Each message keeps the variant it was sent with and specialists inherit the variant
 of the operator message that launched them, so a change in the TUI affects only
 later messages. Vigil's OpenCode sessions do not load Claude Code's global
-`CLAUDE.md` or skills.
+`CLAUDE.md` or skills. On OpenCode 2 the web/code start's staged config directory replaces
+OpenCode's global config directory for that session, so agents, commands, plugins and provider
+definitions from `~/.config/opencode` are not loaded; credentials saved with `/connect` still apply.
 
-On a specialist task's first request, Vigil's OpenCode plugin resolves its
-dispatch from the captured packet path in the launch message, checks the packet
-digest and the backend row, and binds the task session with
-`agent bind-client-handle`. The task result then ends with a
-`Vigil dispatch binding:` JSON line giving the binding status and the observed
-native agent, model and variant. When the native agent differs from the
+Specialist roles and OpenCode's built-in `general` and `explore` subagents deny OpenCode's
+`question` tool, which OpenCode never answers on its own, so a subagent cannot hold an unattended
+run on an unanswered question. The operator can still ask you.
+
+The operator launches a specialist with the `task` tool and `subagent_type` on OpenCode 1, and
+with the `subagent` tool and `agent` on OpenCode 2. On a specialist's first request, Vigil's
+OpenCode plugin resolves its dispatch from the captured packet path in the launch message, checks
+the packet digest and the backend row, and binds the specialist session with
+`agent bind-client-handle`. A `Vigil dispatch binding:` JSON line then gives the binding status
+and the observed native agent, model and variant. On OpenCode 1 it ends the task result. On
+OpenCode 2 the `subagent` call returns at once, before the child works, the child's result arrives
+later as a `<subagent …>` message in the operator session, and the plugin posts the line as a
+separate Vigil note in that session. When the native agent differs from the
 dispatch's registered role, that line and the specialist's system context carry
 a `native_agent_role_mismatch` advisory. A dispatch already bound to another
 session is left bound there and reported as `dispatch_already_bound`. The
 dispatch row's `actual_model` and `actual_reasoning` stay `unknown`, because
 the backend accepts no client-reported runtime identity.
-When a bound specialist's task returns empty, without a final handoff, or still
-holding code-queue leases, the result also ends with a `Vigil dispatch status:`
-JSON line listing the leases and the exact close, continue and lease commands.
-
-On OpenCode 2, Vigil selects the operator through the session config and starts the TUI with
-`--standalone`. OpenCode 2 does not load Vigil's OpenCode plugin, so specialists are not bound
-to their dispatch and Vigil's hooks do not run; OpenCode 1 has full support.
+When a bound specialist returns empty, without a final handoff, or still
+holding code-queue leases, a `Vigil dispatch status:` JSON line lists the leases and the exact
+close, continue and lease commands, at the end of the task result on OpenCode 1 and as a separate
+Vigil note in the operator session on OpenCode 2.
 
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
-is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.
+is not the tested Vigil surface; this integration targets the OpenCode CLI/TUI.
 
 ### ZCode desktop
 
@@ -248,7 +270,8 @@ enabled by this integration. Full setup and verification: [ZCode setup](zcode-se
 ## Repository-context remediation clients
 
 `vigil remediation -k <key> start --client opencode` opens OpenCode's native TUI
-with a defensive `/vigil-remediate` command. It retains native authentication,
+with a defensive `/vigil-remediate` command; on OpenCode 2 the TUI runs `--standalone` so the
+session's command applies. It retains native authentication,
 models, approvals, and project plugins; choose Z.AI Coding Plan with `/connect`
 and an entitled model with `/models`.
 

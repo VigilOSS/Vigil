@@ -4,20 +4,21 @@
 //
 // Vigil standard OpenCode hooks. Mirrors the Claude `.claude/settings.json` and
 // Codex `.codex/config.toml` standard hooks for the OpenCode runtime, which reads
-// neither of those — it loads plugins from `.opencode/plugin/`:
-//   - tool.execute.after  -> scripts/hooks/post-tool-log.sh (PostToolUse logger).
+// neither of those — it loads plugins from `.opencode/plugin/`. The default export
+// loads on both majors: OpenCode 1 calls `server`, OpenCode 2 calls `setup`.
+//   - tool execute.after  -> scripts/hooks/post-tool-log.sh (PostToolUse logger).
 //       records the command into the backend activity log (`vigil assess log`)
 //       so OpenCode's host commands, which never pass through
 //       assessment_command_runs, remain visible in the activity trail.
 //       Best-effort: a logging failure never blocks the run.
 //
-// There is deliberately NO tool.execute.before hook here. Vigil does not filter
+// There is deliberately NO execute.before hook here. Vigil does not filter
 // its own operator's shell commands (ADR 0019): a command-string filter cannot
 // see through the shell, and the only party it acted against was the operator.
-// KNOWN LIMITATION (opencode#5894): tool.execute.before/after do NOT fire for
-// subagent (`task`) or MCP tool calls — only for the inline operator's own bash
-// calls. A dispatched specialist's host commands are therefore not activity-logged
-// here; network isolation still constrains all target traffic.
+// KNOWN LIMITATION on OpenCode 1 (opencode#5894): tool.execute.before/after do NOT
+// fire for subagent (`task`) or MCP tool calls — only for the inline operator's own
+// bash calls. A dispatched specialist's host commands are therefore not
+// activity-logged there; network isolation still constrains all target traffic.
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
@@ -45,8 +46,30 @@ function resolveHook(name) {
   return ""
 }
 
+// PostToolUse-equivalent. Best-effort; never blocks the run on a logging failure.
+function logCommand(command, agent = "operator") {
+  if (!command) return
+  const logHook = resolveHook("post-tool-log.sh")
+  if (!logHook) return
+  try {
+    execFileSync("bash", [logHook], {
+      input: JSON.stringify({
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+        tool_response: {},
+        agent_type: agent,
+        cwd: process.env.ENGAGEMENT_DIR || "",
+      }),
+      env: process.env,
+      stdio: ["pipe", "ignore", "ignore"],
+    })
+  } catch (e) {
+    // best-effort; never block the run on a logging failure
+  }
+}
+
 export const VigilStandardHooks = async () => ({
-  // PostToolUse-equivalent. Best-effort.
   "tool.execute.after": async (input, output) => {
     const tool = String((input && input.tool) || "").toLowerCase()
     if (tool !== "bash") return
@@ -54,26 +77,24 @@ export const VigilStandardHooks = async () => ({
     // puts them in `output.args`, where `output` here is {title,output,metadata}).
     // Reading output.args in the after-hook yields undefined — which silently
     // disabled activity logging. Prefer input.args, fall back to output.args.
-    const command = (input && input.args && input.args.command)
-      || (output && output.args && output.args.command)
-    if (!command) return
-    const logHook = resolveHook("post-tool-log.sh")
-    if (!logHook) return
-    try {
-      execFileSync("bash", [logHook], {
-        input: JSON.stringify({
-          hook_event_name: "PostToolUse",
-          tool_name: "Bash",
-          tool_input: { command },
-          tool_response: {},
-          agent_type: "operator",
-          cwd: process.env.ENGAGEMENT_DIR || "",
-        }),
-        env: process.env,
-        stdio: ["pipe", "ignore", "ignore"],
-      })
-    } catch (e) {
-      // best-effort; never block the run on a logging failure
-    }
+    logCommand((input && input.args && input.args.command)
+      || (output && output.args && output.args.command))
   },
 })
+
+export default {
+  id: "vigil-standard-hooks",
+  server: VigilStandardHooks,
+  // OpenCode 2 names the tool `shell`, passes the executed input on the event, and
+  // runs this hook for child sessions too, so the event names the agent.
+  setup: async (ctx) => {
+    await ctx.tool.hook("execute.after", (event) => {
+      try {
+        if (event && event.tool === "shell") logCommand(event.input && event.input.command,
+          typeof event.agent === "string" && event.agent ? event.agent : "operator")
+      } catch (e) {
+        console.error(`[vigil] OpenCode shell activity was not logged: ${e.message}`)
+      }
+    })
+  },
+}

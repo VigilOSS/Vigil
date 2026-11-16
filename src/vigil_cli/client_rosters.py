@@ -631,24 +631,24 @@ def ensure_opencode_plugin(agent_root: Path, opencode_dir: Path) -> None:
 
     Mirrors ``ensure_claude_settings``: refresh stale copies during repair so a
     fix to the standard activity-log plugin reaches existing engagements too.
-    Written to both ``plugin`` and ``plugins`` (the binary honours either
-    directory name; the singular is predominant).
+    Both OpenCode majors scan ``plugin/`` and ``plugins/``, and OpenCode 2
+    rejects a second module with the same plugin id, so the plugin lives only in
+    ``plugin/`` and a copy Vigil earlier wrote to ``plugins/`` is retired.
     """
     plugin_src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
     if not plugin_src.is_file():
         return
     body = plugin_src.read_text(encoding="utf-8")
-    for dirname in ("plugin", "plugins"):
-        plugin_dir = opencode_dir / dirname
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-        dest = plugin_dir / "standard-hooks.js"
-        if dest.is_symlink():
-            dest.unlink()
-        elif dest.exists() and not dest.is_file():
-            continue
-        if dest.exists() and dest.read_text(encoding="utf-8") == body:
-            continue
+    plugin_dir = opencode_dir / "plugin"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    dest = plugin_dir / "standard-hooks.js"
+    if dest.is_symlink():
+        dest.unlink()
+    if not dest.exists() or (dest.is_file() and dest.read_text(encoding="utf-8") != body):
         dest.write_text(body, encoding="utf-8")
+    retired = opencode_dir / "plugins" / "standard-hooks.js"
+    if retired.is_symlink() or retired.is_file():
+        retired.unlink()
 
 
 def ensure_goose_recipes_link(agent_root: Path, goose_dir: Path) -> None:
