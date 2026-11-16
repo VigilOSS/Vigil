@@ -49,7 +49,7 @@ def resolve_report_writer(
         require_recorded_dispatch(client, explicit, operation=operation)
         return explicit
     rows = client.get("dispatches?" + urlencode({
-        "role": REPORT_WRITER_ROLE, "status": "in_progress", "limit": _DISPATCH_PAGE_LIMIT,
+        "role": REPORT_WRITER_ROLE, "status": "in-progress", "limit": _DISPATCH_PAGE_LIMIT,
     }))
     if not isinstance(rows, list):
         raise AssessError(

@@ -40,7 +40,7 @@ def _install(monkeypatch, tmp_path, *, heartbeats, progress=None):
 
         def get(self, endpoint: str):
             if endpoint == f"dispatches/{_AGENT}":
-                return {"agent_id": _AGENT, "status": "in_progress"}
+                return {"agent_id": _AGENT, "status": "in-progress"}
             assert endpoint == "code/analysis-queue/7/progress"
             calls["progress"] += 1
             return progress
@@ -203,7 +203,7 @@ def _install_lane(monkeypatch, tmp_path, *, heartbeats, progress, dispatch=None,
         def get(self, endpoint: str):
             if endpoint.startswith("dispatches/"):
                 calls["dispatch_reads"] = calls.get("dispatch_reads", 0) + 1
-                status = next(dispatch_status) if dispatch_status else "in_progress"
+                status = next(dispatch_status) if dispatch_status else "in-progress"
                 return {"agent_id": endpoint.split("/", 1)[1], "status": status}
             item_id = int(endpoint.split("/")[2])
             return progress[item_id]
@@ -351,7 +351,7 @@ def test_lane_keepalive_stops_when_its_dispatch_closes(monkeypatch, tmp_path, ca
         monkeypatch, tmp_path,
         heartbeats={7: [_ALIVE], 8: [_ALIVE]},
         progress={},
-        dispatch=["in_progress", "in_progress", "failed"],
+        dispatch=["in-progress", "in-progress", "failed"],
     )
 
     assert _run_lane("--keepalive", "--claims-file", _claims_file(tmp_path)) == 1
@@ -359,6 +359,25 @@ def test_lane_keepalive_stops_when_its_dispatch_closes(monkeypatch, tmp_path, ca
     assert calls["heartbeat"] == [7, 8]
     err = capsys.readouterr().err
     assert f"dispatch {_AGENT} is failed" in err and "go stale" in err
+
+
+def test_lane_keepalive_keeps_renewing_while_its_dispatch_is_in_progress(
+    monkeypatch, tmp_path, capsys
+):
+    """The backend spells a live dispatch `in-progress`; that is the watch's go-on answer."""
+    calls = _install_lane(
+        monkeypatch, tmp_path,
+        heartbeats={7: [_ALIVE, _refused(7)], 8: [_ALIVE, _ALIVE, _refused(8)]},
+        progress={7: _closed(7), 8: _closed(8)},
+        dispatch=["in-progress"] * 4,
+    )
+
+    assert _run_lane("--keepalive", "--claims-file", _claims_file(tmp_path)) == 0
+
+    assert calls["heartbeat"] == [7, 8, 7, 8, 8]
+    err = capsys.readouterr().err
+    assert "stopping because" not in err
+    assert f"dispatch {_AGENT} (in-progress) while it is in-progress" in err
 
 
 def test_lane_keepalive_stops_at_its_maximum_lifetime(monkeypatch, tmp_path, capsys):

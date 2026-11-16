@@ -831,7 +831,9 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
 def get_dispatches(
     engagement_key: str,
     role: str = "",
-    status_value: str = Query(default="", alias="status"),
+    # The write's vocabulary, folded the same way: `in_progress` names `in-progress`,
+    # and a word outside it is refused rather than matching nothing.
+    status_value: _DISPATCH_STATUS | None = Query(default=None, alias="status"),
     since: str = "",
     task_q: str = "",
     limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
@@ -841,7 +843,7 @@ def get_dispatches(
     return state_manager.list_dispatches(
         engagement.id,
         role=role,
-        status_value=status_value,
+        status_value=status_value or "",
         since=since,
         task_q=task_q,
         limit=limit,

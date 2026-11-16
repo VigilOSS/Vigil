@@ -35,7 +35,7 @@ class _Client:
         if parts.path == "dispatches":
             query = parse_qs(parts.query)
             assert query["role"] == ["report-writer"]
-            assert query["status"] == ["in_progress"]
+            assert query["status"] == ["in-progress"]
             return list(self.in_progress)
         agent_id = parts.path.removeprefix("dispatches/")
         if agent_id not in self.recorded:

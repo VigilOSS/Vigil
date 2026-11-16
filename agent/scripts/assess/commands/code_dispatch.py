@@ -28,6 +28,7 @@ from assess.lib.config import load_config, resolve_input_path
 from assess.lib.contracts import CODE_SKIP_REASONS
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.code_structural_identity import parse_code_file_page
+from assess.lib.vocabulary import vocabulary_key
 
 _CODE_FILE_LOOKUP_PAGE_SIZE = 10000
 _MAX_QUEUE_IDS_FILE_BYTES = 64 * 1024
@@ -161,7 +162,7 @@ _ACTION_HELP: dict[str, str] = {
         "reset-stale or adopt-lease): when the --owner-pid process exits (pass $PPID "
         "from the lane's shell; without it the owner is derived from the process tree "
         "when it can be), when the dispatch named by the lease's agent-id is no longer "
-        "in_progress, or after --max-lifetime seconds (default 14400, 60-86400). It "
+        "in-progress, or after --max-lifetime seconds (default 14400, 60-86400). It "
         "names what it watches on start.\n"
     ),
     "done": (
@@ -2199,6 +2200,11 @@ def _claim_leases(path_value: str) -> list[tuple[int, str, str]]:
     return leases
 
 
+# The live value of the backend's dispatch status vocabulary
+# (`api/assessment_operator.py:_DISPATCH_STATUS`).
+_DISPATCH_LIVE_STATUS = "in-progress"
+
+
 def _dispatch_status(client, agent_name: str) -> str | None:
     """The dispatch row's status, '' when no dispatch has that agent_id, None if unread."""
     try:
@@ -2223,7 +2229,7 @@ def _keepalive_watch_ended(
         return f"its owner pid {owner.pid} ({owner.label}) ended"
     for agent_name in sorted(dispatches):
         status = _dispatch_status(client, agent_name)
-        if status and status != "in_progress":
+        if status and vocabulary_key(status) != vocabulary_key(_DISPATCH_LIVE_STATUS):
             return f"dispatch {agent_name} is {status}"
     return ""
 
@@ -2275,7 +2281,8 @@ def _keepalive(cfg, leases: list[tuple[int, str, str]], options: _KeepaliveOptio
                 continue
             dispatches.add(agent_name)
             watched.append(
-                f"dispatch {agent_name} ({status or 'status unread'}) while it is in_progress"
+                f"dispatch {agent_name} ({status or 'status unread'}) while it is "
+                f"{_DISPATCH_LIVE_STATUS}"
             )
     watched.insert(
         0,

@@ -401,6 +401,29 @@ def test_dispatch_list_filters(client, isolate_settings) -> None:
     assert [r["agent_id"] for r in resp.json()] == ["F2"]
 
 
+def test_dispatch_list_status_filter_folds_spelling_and_refuses_unknown_words(
+    client, isolate_settings
+) -> None:
+    """The list filter reads the write's vocabulary: `in_progress` names `in-progress`."""
+    _seed(client, isolate_settings)
+    for agent_id, status_word in (("L1", "in-progress"), ("L2", "completed")):
+        created = _dispatch(
+            client, agent_id=agent_id, agent_role="recon-specialist",
+            status=status_word, skills="subdomain-enumeration",
+        )
+        assert created.status_code == 201, created.text
+
+    live = {SEED_AUTHOR_AGENT_ID, "L1"}
+    for spelling in ("in-progress", "in_progress", "In Progress"):
+        resp = client.get(f"{BASE}/dispatches", params={"status": spelling})
+        assert resp.status_code == 200, resp.text
+        assert {r["agent_id"] for r in resp.json()} == live
+
+    refused = client.get(f"{BASE}/dispatches", params={"status": "running"})
+    assert refused.status_code == 422
+    assert "status" in refused.text
+
+
 def test_dispatch_validation_folds_status_spelling_and_rejects_unknown_values(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     # A separator variant of a status word folds to its canonical spelling.

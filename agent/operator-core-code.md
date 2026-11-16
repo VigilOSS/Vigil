@@ -211,7 +211,9 @@ verdict itself (`code-phase-3-verify-variant.md` "Operator-authority terminal ve
   `code-dispatch heartbeat --keepalive --claims-file <fetch-json> --owner-pid $PPID` per lane, where
   each lease stops on its own when its item closes or the lease moves. The keepalive also stops when
   its client exits, its dispatch is no longer in progress, or after four hours, so closing a dead
-  lane's dispatch lets its leases go stale for `reset-stale`/`adopt-lease`. Each lane closes with its fetched `agent_name` + `lease_token`. `fetch` claims only currently-claimable rows, so reconcile a short claim before
+  lane's dispatch lets its leases go stale for `reset-stale`/`adopt-lease`. To hold leases for lanes
+  that cannot renew their own, run one such keepalive over their merged fetch JSON
+  (`jq -s add <fetch-json>...`), never one heartbeat call per lease. Each lane closes with its fetched `agent_name` + `lease_token`. `fetch` claims only currently-claimable rows, so reconcile a short claim before
   dispatch (Phase 2 "Fetch loop"); an unreconciled id is owned by no lane.
 - **Prior-art leads.** Phase 1 binds them to files (`code-lead`). Each bound lead needs a terminal
   `lead_status` or an unbind before `complete`, whose `code_leads_unresolved` blocker refuses `--force`.
