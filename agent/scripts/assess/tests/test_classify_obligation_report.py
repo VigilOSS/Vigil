@@ -115,6 +115,29 @@ def test_a_large_pass_prints_a_bounded_sample_and_the_full_list(monkeypatch, tmp
     assert "activity-entries?q=code-record%20classify" in out
 
 
+def test_the_full_list_reads_the_system_audit_entries_not_the_operators_command(
+    monkeypatch, tmp_path, capsys
+):
+    """The operator's own Bash call is audited under the same words, newest first,
+    so the read filters to the system entries that carry obligation_changes."""
+    from urllib.parse import parse_qs, urlsplit
+
+    changes = [_change(file_id) for file_id in range(1, 31)]
+    _classify(
+        monkeypatch, tmp_path, _Client({"obligation_changes": changes}),
+        [_medium(file_id) for file_id in range(1, 31)],
+    )
+
+    out = capsys.readouterr().out
+    path = out.split("vigil assess fetch '", 1)[1].split("'", 1)[0]
+    endpoint = urlsplit(path)
+    query = parse_qs(endpoint.query)
+    assert endpoint.path == "activity-entries"
+    assert query["q"] == ["code-record classify"]
+    assert query["actor_kind"] == ["system"]
+    assert int(query["limit"][0]) >= 1
+
+
 def test_kept_role_and_slot_types_are_named(monkeypatch, tmp_path, capsys):
     client = _Client({"derived": [
         {"file_id": 1, "file_path": "src/acme_1.py", "field": "role", "value": "parser"},

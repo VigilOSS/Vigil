@@ -528,8 +528,11 @@ def _print_derived(derived: list[dict]) -> None:
 # Files whose obligation change is printed in full; the rest are counted and
 # the audit read below lists every one.
 _OBLIGATION_CHANGE_SAMPLE = 20
+# The backend writes each chunk's audit entry as actor_kind=system; the
+# operator's own command is audited under the same words and sorts first.
 _OBLIGATION_CHANGE_FULL_LIST = (
-    "vigil assess fetch 'activity-entries?q=code-record%20classify&limit={limit}' "
+    "vigil assess fetch "
+    "'activity-entries?q=code-record%20classify&actor_kind=system&limit={limit}' "
     "(each classify chunk's audit entry carries metadata.obligation_changes)"
 )
 _RETIRED_TRIGGERS_LIST = (
