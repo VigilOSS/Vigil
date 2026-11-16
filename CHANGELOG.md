@@ -5,7 +5,7 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
-## [Unreleased]
+## [2.10.0] - 2026-11-16
 
 ### Changed
 
@@ -32,6 +32,10 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - `kali browser` keeps its printed summary within 32 KiB and names each shortened result and
   where the whole result is.
 - The `code-classify` obligation report's full-list command lists only system entries.
+- `code-dispatch heartbeat --keepalive` keeps renewing while its dispatch is in progress, and
+  report writers are attributed to their running dispatch.
+- The dispatch list's `status` filter accepts any spelling of a status and refuses an unknown one.
+- `vigil assess` helpers start faster: each call builds only the command it runs.
 
 ## [2.9.2] - 2026-11-16
 
