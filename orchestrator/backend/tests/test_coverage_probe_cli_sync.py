@@ -12,37 +12,18 @@ contracts) importable, which only the backend venv provides. They fail loudly if
 """
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-CLI_PATH = REPO_ROOT / "agent" / "scripts" / "assess" / "cli.py"
-
-
-def _cli_imported_commands() -> set[str]:
-    tree = ast.parse(CLI_PATH.read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "assess.commands":
-            imported.update(alias.name for alias in node.names)
-    return imported
+import argparse
 
 
 def _cli_registered_commands() -> set[str]:
-    """Names iterated by the `for mod in (...)` register loop(s) in cli.py.
+    """The top-level commands the whole `vigil assess` parser tree registers."""
+    from assess import cli
 
-    A command in the import block but omitted from the register loop is a silent
-    bug (imported, never wired) — so the drift guard must check BOTH, not just
-    imports.
-    """
-    tree = ast.parse(CLI_PATH.read_text(encoding="utf-8"))
-    registered: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.For) and isinstance(node.iter, (ast.Tuple, ast.List)):
-            registered.update(
-                elt.id for elt in node.iter.elts if isinstance(elt, ast.Name)
-            )
-    return registered
+    parser = cli._build_parser(None, [])
+    (commands,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return set(commands.choices)
 
 
 def test_coverage_statuses_mirror_backend_enum() -> None:
@@ -91,11 +72,9 @@ def test_surface_create_statuses_match_the_backend_create_contract() -> None:
 
 
 def test_cli_registers_merged_probe_coverage_verbs() -> None:
-    imported = _cli_imported_commands()
     registered = _cli_registered_commands()
-    for cmd in ("record_probe", "resolve"):
-        assert cmd in imported, f"{cmd} not imported in cli.py 'from assess.commands import ...' block"
-        assert cmd in registered, f"{cmd} imported but missing from the cli.py 'for mod in (...)' register loop"
+    for cmd in ("record-probe", "resolve"):
+        assert cmd in registered, f"`vigil assess {cmd}` is not registered"
 
 
 def test_raw_probe_and_coverage_paths_are_redirected() -> None:
@@ -120,10 +99,8 @@ def test_attempts_read_folded_into_coverage() -> None:
     """A4a: the probe-attempt read (former list-attempts) is now `coverage
     --attempts` — `coverage` must stay registered and its contract must document
     the --attempts view."""
-    imported = _cli_imported_commands()
-    registered = _cli_registered_commands()
-    assert "coverage" in imported and "coverage" in registered, (
-        "coverage command dropped out of cli.py"
+    assert "coverage" in _cli_registered_commands(), (
+        "`vigil assess coverage` is not registered"
     )
     from assess.lib import contracts
 

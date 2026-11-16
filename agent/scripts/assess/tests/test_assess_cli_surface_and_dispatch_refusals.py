@@ -136,6 +136,49 @@ def test_assess_argparse_tree_signature_is_unchanged() -> None:
     assert hashlib.sha256(blob.encode()).hexdigest() == _EXPECTED_TREE_DIGEST
 
 
+# A helper call builds only the parser of the command it names. That parser must
+# be the one the whole tree holds for the command, for every top-level command.
+
+
+def _command_parsers(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    (commands,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return dict(commands.choices)
+
+
+def test_each_command_alone_builds_the_parser_the_whole_tree_holds() -> None:
+    with mock.patch.object(code_index, "default_parser_jobs", lambda: MAX_DEFAULT_PARSER_JOBS):
+        full = _command_parsers(_root_parser())
+        for name in full:
+            # Only the command's own module registers (one module owns two names).
+            selected = _command_parsers(cli._build_parser(name, [name]))
+            assert name in selected and len(selected) <= 2
+            for built, parser in selected.items():
+                assert _parser_signature(parser, (built,)) == _parser_signature(
+                    full[built], (built,)
+                )
+
+
+def test_an_unknown_command_builds_the_whole_tree() -> None:
+    assert len(_command_parsers(cli._build_parser("code-dispach", ["code-dispach"]))) == len(
+        _command_parsers(_root_parser())
+    )
+
+
+def test_a_root_level_error_reads_as_the_whole_tree_s(capsys) -> None:
+    argv = ["list-skills", "--acme-unknown"]
+    with pytest.raises(SystemExit) as whole:
+        cli._build_parser(None, argv).parse_args(argv)
+    expected = capsys.readouterr().err
+    with pytest.raises(SystemExit) as selected:
+        cli._build_parser("list-skills", argv).parse_args(argv)
+
+    assert selected.value.code == whole.value.code == 2
+    assert capsys.readouterr().err == expected
+    assert "unrecognized arguments: --acme-unknown" in expected
+
+
 # --------------------------------------------------------------------------- #
 # Every contract this CLI can render, rendered. Covers the static registry, the
 # namespace parents, the per-intel-type forms, the kali per-verb composition,

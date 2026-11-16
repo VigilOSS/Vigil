@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import re
 import sys
@@ -388,8 +389,249 @@ def _register_subcommand_group(sub, *, name, help_text, dest, leaf_modules) -> N
     parent.set_defaults(func=_print_group_help)
 
 
-def main(argv: list[str] | None = None) -> None:
-    from assess.lib.client import AssessError
+# Every top-level command's module under `assess.commands`, in help order; its
+# `register(sub)` adds the command. A command's module is its name with `-` as `_`
+# unless `_COMMAND_MODULE_NAMES` names it. `main` imports and registers only the
+# selected command, so a helper call does not import and build every parser;
+# no command, `--help`, an unknown command or a root-level parse error builds the
+# whole tree (`_build_parser`).
+_COMMAND_MODULES = (
+    "fetch",
+    "scope",
+    "resume_brief",
+    "prompt_census",
+    "artifact",
+    "fixture_identity",
+    "post",
+    "proof_receipt",
+    "proof_run",
+    "proof_work",
+    "run_audit",
+    "resolve",
+    "emit_event",
+    "log_entry",
+    "record_reply",
+    "record_surface",
+    "record_chain",
+    "record_probe",
+    "block_technique",
+    "operator_checkpoint",
+    "agent",
+    "app_unit",
+    "auth_cmd",
+    "work_buffer",
+    "arjun_select",
+    "arjun_sweep",
+    "ingest",
+    "dns_discovery",
+    "web_discovery",
+    "recon",
+    "recon_status",
+    "coverage",
+    "js_mining",
+    "egress_check",
+    "gau",
+    "classify_payload",
+    "anomaly_score",
+    "list_commands",
+    "list_mindsets",
+    "list_references",
+    "list_skills",
+    "check_phase_readiness",
+    "exploit",
+    "scaffold_probe",
+    "approve_proposal",
+    "host_exec",
+    "http_cmd",
+    "code_ingest",
+    "code_index",
+    "code_record",
+    "code_dispatch",
+    "code_lead",
+    "code_coverage",
+    "code_dependencies",
+    "code_history",
+    "code_size_summary",
+    "code_snapshot_repair",
+    "code_sourcemap_extract",
+    "contract",
+    "transition_phase",
+)
+_COMMAND_MODULE_NAMES = {
+    "auth": "auth_cmd",
+    "fixture": "fixture_identity",
+    "http": "http_cmd",
+    "list-blocked-techniques": "block_technique",
+    "log": "log_entry",
+}
+
+# Grouped namespacing: finding / intel / export / chain / command-run verbs shelved
+# under a subcommand parent, mirroring the `kali` / `work-buffer` pattern (see
+# `_register_subcommand_group`). Each leaf keeps its exact argument parser.
+# (name, help, action dest, leaf modules), registered after `_COMMAND_MODULES`.
+_COMMAND_GROUPS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    (
+        "finding",
+        "Finding lifecycle: record, update, verify, relocate, retract-claim, merge, link, corroborate, list, get, history, report.",
+        "finding_action",
+        (
+            "record_finding",
+            "bind_finding_author",
+            "update_finding",
+            "verify_finding",
+            "relocate_finding",
+            "retract_finding_claim",
+            "merge_finding",
+            "link_finding",
+            "corroborate_finding",
+            "list_findings",
+            "get_finding",
+            "finding_history",
+            "list_report_findings",
+        ),
+    ),
+    (
+        "intel",
+        "Structured intel: record, update, list, get, supersede.",
+        "intel_action",
+        (
+            "record_intel",
+            "update_intel",
+            "list_intel",
+            "get_intel",
+            "supersede_intel",
+        ),
+    ),
+    (
+        "export",
+        "Render findings.md, a platform submission/reply, a blind-triage packet, or surfaces.jsonl.",
+        "export_kind",
+        (
+            "export_findings",
+            "export_submission",
+            "export_reply",
+            "export_triage_packet",
+            "export_surfaces",
+        ),
+    ),
+    (
+        "chain",
+        "Recorded attack chains: list (record one with `record-chain`).",
+        "chain_action",
+        ("list_chains",),
+    ),
+    (
+        "command-run",
+        "Inspect `vigil assess kali` command-run audit records: list, get.",
+        "command_run_action",
+        (
+            "list_command_runs",
+            "get_command_run",
+        ),
+    ),
+)
+
+_KALI_MODULES = (
+    "kali_alterx",
+    "kali_arjun",
+    "kali_asnmap",
+    "kali_bbot",
+    "kali_browser",
+    "kali_cero",
+    "kali_dalfox",
+    "kali_dnsx",
+    "kali_exec",
+    "kali_ffuf",
+    "kali_gau",
+    "kali_gf",
+    "kali_httpx",
+    "kali_job",
+    "kali_katana",
+    "kali_nikto",
+    "kali_nmap",
+    "kali_nuclei",
+    "kali_puredns",
+    "kali_robots",
+    "kali_sqlmap",
+    "kali_subfinder",
+    "kali_sweep",
+    "kali_sweep_orphans",
+    "kali_tlsx",
+    "kali_tool_help",
+    "kali_wafw00f",
+    "kali_whatweb",
+)
+
+
+def _command_module(name: str):
+    return importlib.import_module(f"assess.commands.{name}")
+
+
+def _register_group(sub, name: str, help_text: str, dest: str, leaves: tuple[str, ...]) -> None:
+    _register_subcommand_group(
+        sub,
+        name=name,
+        help_text=help_text,
+        dest=dest,
+        leaf_modules=tuple(_command_module(leaf) for leaf in leaves),
+    )
+
+
+def _register_kali(sub) -> None:
+    from assess.lib.kali import KALI_EXIT_CODES, ScopedErrorParser
+
+    kali = sub.add_parser(
+        "kali",
+        help="Run Kali tools via host-side docker exec with audit recording.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Exit codes (also reported as `.status` in the JSON on stdout):\n"
+            "  0  completed, or waf_challenge — a usable result came back. A WAF\n"
+            "     interstitial IS a complete exchange; it is loud on stderr and in\n"
+            "     `.status`, and its remedy is `kali browser`, not aborting the chain.\n"
+            + "".join(
+                f"  {code}  {status} — no complete output exists to interpret\n"
+                for status, code in sorted(KALI_EXIT_CODES.items(), key=lambda kv: kv[1])
+            )
+            + "  1  Vigil refused the run (scope/policy/audit); 2  argparse rejected the flags.\n"
+            + f"  {_SIGPIPE_EXIT_CODE}  the reader of this stdout went away, so the JSON above\n"
+            "     never arrived; it replaces every status in this list, and a\n"
+            "     refusal that reached stderr still stands.\n"
+        ),
+    )
+    # parser_class makes every `kali <verb>` subparser a ScopedErrorParser so a
+    # parse-time enum miss (--technique/--probe-kind/--phase invalid choice) is
+    # re-rendered as a single scoped did-you-mean ERROR line instead of the stock
+    # multi-line top-level usage dump.
+    kali_sub = kali.add_subparsers(dest="kali_verb", parser_class=ScopedErrorParser)
+    kali_sub.required = False
+    for name in _KALI_MODULES:
+        _command_module(name).register(kali_sub)
+
+    def _print_kali_help(_args) -> None:
+        kali.print_help()
+        sys.exit(1)
+
+    kali.set_defaults(func=_print_kali_help)
+
+
+def _register_selected(sub, command: str) -> bool:
+    """Register only ``command``; False when that cannot name it."""
+    if command == "kali":
+        _register_kali(sub)
+        return True
+    for name, help_text, dest, leaves in _COMMAND_GROUPS:
+        if name == command:
+            _register_group(sub, name, help_text, dest, leaves)
+            return True
+    module = _COMMAND_MODULE_NAMES.get(command, command.replace("-", "_"))
+    if module not in _COMMAND_MODULES:
+        return False
+    _command_module(module).register(sub)
+    return command in sub.choices
+
+
+def _root_parser() -> argparse.ArgumentParser:
     from assess.lib.config import ENGAGEMENT_BINDING_CONTRACT
 
     parser = argparse.ArgumentParser(
@@ -424,319 +666,39 @@ def main(argv: list[str] | None = None) -> None:
         help="Actor kind for commands that write activity entries (currently log)",
     )
 
+    return parser
+
+
+def _build_parser(command: str | None, argv: list[str]) -> argparse.ArgumentParser:
+    """The `vigil assess` parser for ``argv``, holding only ``command`` when it names one.
+
+    A parser built for one command answers a root-level parse error (an
+    unrecognized argument, a bad root flag) by parsing ``argv`` through the whole
+    tree, so the error and its usage line are exactly the full tree's.
+    """
+    if command is not None:
+        parser = _root_parser()
+        sub = parser.add_subparsers(dest="command")
+        if _register_selected(sub, command):
+            def _full_tree_error(message: str) -> NoReturn:
+                full = _build_parser(None, argv)
+                full.parse_args(argv)
+                full.error(message)
+
+            parser.error = _full_tree_error  # type: ignore[method-assign]
+            return parser
+    parser = _root_parser()
     sub = parser.add_subparsers(dest="command")
+    for name in _COMMAND_MODULES:
+        _command_module(name).register(sub)
+    for name, help_text, dest, leaves in _COMMAND_GROUPS:
+        _register_group(sub, name, help_text, dest, leaves)
+    _register_kali(sub)
+    return parser
 
-    from assess.commands import (
-        agent,
-        anomaly_score,
-        app_unit,
-        approve_proposal,
-        arjun_select,
-        arjun_sweep,
-        artifact,
-        auth_cmd,
-        block_technique,
-        bind_finding_author,
-        check_phase_readiness,
-        classify_payload,
-        contract,
-        corroborate_finding,
-        coverage,
-        dns_discovery,
-        egress_check,
-        code_coverage,
-        code_dependencies,
-        code_dispatch,
-        code_history,
-        code_index,
-        code_ingest,
-        code_lead,
-        code_record,
-        code_size_summary,
-        code_snapshot_repair,
-        code_sourcemap_extract,
-        emit_event,
-        exploit,
-        export_findings,
-        export_reply,
-        export_submission,
-        export_triage_packet,
-        export_surfaces,
-        fetch,
-        finding_history,
-        fixture_identity,
-        gau,
-        get_command_run,
-        get_finding,
-        get_intel,
-        host_exec,
-        http_cmd,
-        ingest,
-        js_mining,
-        kali_alterx,
-        kali_arjun,
-        kali_asnmap,
-        kali_bbot,
-        kali_browser,
-        kali_cero,
-        kali_dalfox,
-        kali_dnsx,
-        kali_exec,
-        kali_ffuf,
-        kali_gau,
-        kali_gf,
-        kali_httpx,
-        kali_job,
-        kali_katana,
-        kali_nikto,
-        kali_nmap,
-        kali_nuclei,
-        kali_puredns,
-        kali_robots,
-        kali_sqlmap,
-        kali_subfinder,
-        kali_sweep,
-        kali_sweep_orphans,
-        kali_tlsx,
-        kali_tool_help,
-        kali_wafw00f,
-        kali_whatweb,
-        list_command_runs,
-        list_chains,
-        list_commands,
-        list_findings,
-        list_intel,
-        list_mindsets,
-        list_references,
-        list_report_findings,
-        list_skills,
-        link_finding,
-        log_entry,
-        merge_finding,
-        operator_checkpoint,
-        resolve,
-        resume_brief,
-        post,
-        prompt_census,
-        proof_receipt,
-        proof_run,
-        proof_work,
-        recon,
-        recon_status,
-        record_chain,
-        record_finding,
-        record_intel,
-        record_probe,
-        record_reply,
-        record_surface,
-        relocate_finding,
-        retract_finding_claim,
-        run_audit,
-        scaffold_probe,
-        scope,
-        supersede_intel,
-        update_finding,
-        update_intel,
-        transition_phase,
-        verify_finding,
-        web_discovery,
-        work_buffer,
-    )
 
-    for mod in (
-        fetch,
-        scope,
-        resume_brief,
-        prompt_census,
-        artifact,
-        fixture_identity,
-        post,
-        proof_receipt,
-        proof_run,
-        proof_work,
-        run_audit,
-        resolve,
-        emit_event,
-        log_entry,
-        record_reply,
-        record_surface,
-        record_chain,
-        record_probe,
-        block_technique,
-        operator_checkpoint,
-        agent,
-        app_unit,
-        auth_cmd,
-        work_buffer,
-        arjun_select,
-        arjun_sweep,
-        ingest,
-        dns_discovery,
-        web_discovery,
-        recon,
-        recon_status,
-        coverage,
-        js_mining,
-        egress_check,
-        gau,
-        classify_payload,
-        anomaly_score,
-        list_commands,
-        list_mindsets,
-        list_references,
-        list_skills,
-        check_phase_readiness,
-        exploit,
-        scaffold_probe,
-        approve_proposal,
-        host_exec,
-        http_cmd,
-        code_ingest,
-        code_index,
-        code_record,
-        code_dispatch,
-        code_lead,
-        code_coverage,
-        code_dependencies,
-        code_history,
-        code_size_summary,
-        code_snapshot_repair,
-        code_sourcemap_extract,
-        contract,
-        transition_phase,
-    ):
-        mod.register(sub)
-
-    # Grouped namespacing: re-shelve finding / intel / export / command-run
-    # verbs under a subcommand parent, mirroring the `kali` / `work-buffer`
-    # pattern (see _register_subcommand_group above). Behavior is unchanged —
-    # a pure re-parent, each leaf keeping its exact argument parser.
-    _register_subcommand_group(
-        sub,
-        name="finding",
-        help_text="Finding lifecycle: record, update, verify, relocate, retract-claim, merge, link, corroborate, list, get, history, report.",
-        dest="finding_action",
-        leaf_modules=(
-            record_finding,
-            bind_finding_author,
-            update_finding,
-            verify_finding,
-            relocate_finding,
-            retract_finding_claim,
-            merge_finding,
-            link_finding,
-            corroborate_finding,
-            list_findings,
-            get_finding,
-            finding_history,
-            list_report_findings,
-        ),
-    )
-    _register_subcommand_group(
-        sub,
-        name="intel",
-        help_text="Structured intel: record, update, list, get, supersede.",
-        dest="intel_action",
-        leaf_modules=(
-            record_intel,
-            update_intel,
-            list_intel,
-            get_intel,
-            supersede_intel,
-        ),
-    )
-    _register_subcommand_group(
-        sub,
-        name="export",
-        help_text="Render findings.md, a platform submission/reply, a blind-triage packet, or surfaces.jsonl.",
-        dest="export_kind",
-        leaf_modules=(
-            export_findings,
-            export_submission,
-            export_reply,
-            export_triage_packet,
-            export_surfaces,
-        ),
-    )
-    _register_subcommand_group(
-        sub,
-        name="chain",
-        help_text="Recorded attack chains: list (record one with `record-chain`).",
-        dest="chain_action",
-        leaf_modules=(list_chains,),
-    )
-    _register_subcommand_group(
-        sub,
-        name="command-run",
-        help_text="Inspect `vigil assess kali` command-run audit records: list, get.",
-        dest="command_run_action",
-        leaf_modules=(list_command_runs, get_command_run),
-    )
-
-    from assess.lib.kali import KALI_EXIT_CODES, ScopedErrorParser
-
-    kali = sub.add_parser(
-        "kali",
-        help="Run Kali tools via host-side docker exec with audit recording.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Exit codes (also reported as `.status` in the JSON on stdout):\n"
-            "  0  completed, or waf_challenge — a usable result came back. A WAF\n"
-            "     interstitial IS a complete exchange; it is loud on stderr and in\n"
-            "     `.status`, and its remedy is `kali browser`, not aborting the chain.\n"
-            + "".join(
-                f"  {code}  {status} — no complete output exists to interpret\n"
-                for status, code in sorted(KALI_EXIT_CODES.items(), key=lambda kv: kv[1])
-            )
-            + "  1  Vigil refused the run (scope/policy/audit); 2  argparse rejected the flags.\n"
-            + f"  {_SIGPIPE_EXIT_CODE}  the reader of this stdout went away, so the JSON above\n"
-            "     never arrived; it replaces every status in this list, and a\n"
-            "     refusal that reached stderr still stands.\n"
-        ),
-    )
-    # parser_class makes every `kali <verb>` subparser a ScopedErrorParser so a
-    # parse-time enum miss (--technique/--probe-kind/--phase invalid choice) is
-    # re-rendered as a single scoped did-you-mean ERROR line instead of the stock
-    # multi-line top-level usage dump.
-    kali_sub = kali.add_subparsers(dest="kali_verb", parser_class=ScopedErrorParser)
-    kali_sub.required = False
-    for kali_mod in (
-        kali_alterx,
-        kali_arjun,
-        kali_asnmap,
-        kali_bbot,
-        kali_browser,
-        kali_cero,
-        kali_dalfox,
-        kali_dnsx,
-        kali_exec,
-        kali_ffuf,
-        kali_gau,
-        kali_gf,
-        kali_httpx,
-        kali_job,
-        kali_katana,
-        kali_nikto,
-        kali_nmap,
-        kali_nuclei,
-        kali_puredns,
-        kali_robots,
-        kali_sqlmap,
-        kali_subfinder,
-        kali_sweep,
-        kali_sweep_orphans,
-        kali_tlsx,
-        kali_tool_help,
-        kali_wafw00f,
-        kali_whatweb,
-    ):
-        kali_mod.register(kali_sub)
-
-    def _print_kali_help(_args) -> None:
-        kali.print_help()
-        sys.exit(1)
-
-    kali.set_defaults(func=_print_kali_help)
+def main(argv: list[str] | None = None) -> None:
+    from assess.lib.client import AssessError
 
     # `vigil assess` execs this module (vigil_cli/main.py -> agent/scripts/
     # assess.py -> main()), so this is the outermost Python frame for every
@@ -751,11 +713,16 @@ def main(argv: list[str] | None = None) -> None:
                 argv = sys.argv[1:]
             argv = _hoist_root_flags(list(argv))
             command_index = _root_command_index(argv)
-            if command_index is not None and command_index < len(argv):
-                if argv[command_index] == "code-dispatch":
-                    code_dispatch.maybe_print_action_help(argv[command_index + 1 :])
-                elif argv[command_index] == "work-buffer":
-                    work_buffer.maybe_print_action_help(argv[command_index + 1 :])
+            command = (
+                argv[command_index]
+                if command_index is not None and command_index < len(argv)
+                else None
+            )
+            if command in ("code-dispatch", "work-buffer"):
+                _command_module(command.replace("-", "_")).maybe_print_action_help(
+                    argv[command_index + 1 :]
+                )
+            parser = _build_parser(command, argv)
             args = parser.parse_args(argv)
             if not args.command:
                 parser.print_help()

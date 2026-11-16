@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import importlib.util
 import json
 import sys
@@ -178,12 +177,13 @@ def test_fixture_contract_is_registered() -> None:
 
 
 def test_assess_cli_wires_fixture_command() -> None:
-    cli_path = _scripts_root() / "assess" / "cli.py"
-    source = cli_path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "assess.commands":
-            imported.update(alias.name for alias in node.names)
-    assert "fixture_identity" in imported
-    assert "fixture_identity," in source
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+
+    parser = cli._build_parser(None, [])
+    (commands,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    assert "fixture" in commands.choices

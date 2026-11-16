@@ -420,17 +420,18 @@ class TestClassifyPayloadCommand:
 # CLI import regression: classify_payload is wired into assess.cli
 # ---------------------------------------------------------------------------
 
-def test_assess_cli_imports_classify_payload() -> None:
-    """cli.py must import classify_payload from assess.commands."""
-    import ast
+def test_assess_cli_registers_classify_payload() -> None:
+    """`vigil assess classify-payload` is a registered top-level command."""
+    import argparse
+    import sys
 
-    repo_root = Path(__file__).resolve().parents[3]
-    path = repo_root / "agent" / "scripts" / "assess" / "cli.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "assess.commands":
-            imported.update(alias.name for alias in node.names)
-    assert "classify_payload" in imported, (
-        "classify_payload not found in 'from assess.commands import ...' block in cli.py"
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+
+    parser = cli._build_parser(None, [])
+    (commands,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
+    assert "classify-payload" in commands.choices

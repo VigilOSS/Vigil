@@ -116,9 +116,12 @@ authoritative registry, but registration shape depends on the command.
    Keep payload-shape and lifecycle truth in the command/lib, not in prompts — prompts should point
    at `vigil assess contract <verb>` rather than duplicating the schema.
 
-3. Wire the applicable `cli.py` touch points: the import block plus either the flat loop, one of four
-   `_register_subcommand_group(...)` calls, or the inline Kali loop. A command with bespoke action
-   help may also need the pre-`parse_args` hook. A Kali verb joins `KALI_TARGET_VERBS` or
+3. Name the module in the applicable `cli.py` roster: `_COMMAND_MODULES` (plus a
+   `_COMMAND_MODULE_NAMES` entry when the command is not the module name with `-` for `_`), a
+   `_COMMAND_GROUPS` entry's leaves, or `_KALI_MODULES`. A helper call imports and builds only the
+   command it names, and `test_assess_cli_surface_and_dispatch_refusals.py` holds each command's
+   parser to the whole tree's. A command with bespoke action help may also need the
+   pre-`parse_args` hook in `main`. A Kali verb joins `KALI_TARGET_VERBS` or
    `KALI_MAINT_VERBS`; `KALI_VERBS` is their computed union.
 
 4. If the verb carries durable contract metadata operators should introspect, add its declarative
@@ -157,7 +160,7 @@ identical. Removing or renaming one therefore means sweeping every caller, not j
 
    *Top level folded into a group action* — `list-command-runs` → `command-run list`,
    `code-record-analysis` → `code-record analysis`, the two shipped folds. There is
-   no alias for this. `_register_subcommand_group` (`agent/scripts/assess/cli.py:98`) takes
+   no alias for this. `_register_subcommand_group` (`agent/scripts/assess/cli.py`) takes
    `name`, `help_text`, `dest` and `leaf_modules` and no `aliases`, and an alias on the `list` leaf
    would only add `command-run list-command-runs` — it cannot put a hyphenated spelling back at the
    top level, where the old caller typed it. Keeping the old name means deliberately registering it

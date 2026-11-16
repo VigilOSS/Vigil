@@ -119,19 +119,22 @@ def _load_proxy_addon_module():
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
 
 
-def test_assess_cli_imports_agent_and_work_buffer() -> None:
-    """Top-level ``vigil assess`` imports the canonical agent + work-buffer commands."""
-    import ast
+def test_assess_cli_registers_agent_and_work_buffer() -> None:
+    """Top-level ``vigil assess`` registers the canonical agent + work-buffer commands."""
+    import argparse
+    import sys
 
-    repo_root = Path(__file__).resolve().parents[3]
-    path = repo_root / "agent/scripts/assess/cli.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "assess.commands":
-            imported.update(alias.name for alias in node.names)
-    assert "agent" in imported
-    assert "work_buffer" in imported
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+
+    parser = cli._build_parser(None, [])
+    (commands,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    assert "agent" in commands.choices
+    assert "work-buffer" in commands.choices
 
 
 def test_agent_action_help_is_action_specific(capsys) -> None:
