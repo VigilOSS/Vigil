@@ -33,7 +33,7 @@ import { Skeleton, SlowLoadHint } from "./Skeletons";
 import { ClearFiltersButton, EmptyState, FilterChip, FilterGroup, PageHeader, ResultsSummary, describeSort } from "./ui";
 import { EntryView, type EntryUi } from "./activity/ActivityEntries";
 import { EntryRecord, isEntrySection, type EntrySection } from "./activity/ActivityRecord";
-import { appendOlder, buildFeed, mergeNewer, shownRows } from "./activity/activityModel";
+import { appendOlder, buildFeed, mergeNewer, placeArrivals, shownRows } from "./activity/activityModel";
 import "../styles/activity.css";
 
 type ActivityTabProps = {
@@ -208,6 +208,16 @@ export function ActivityTab({
   const generationRef = useRef(0);
   const rowsRef = useRef<ActivityItem[]>([]);
   const pendingRef = useRef<ActivityItem[]>([]);
+  // Arrivals older than the loaded rows, held for the older page that lists them.
+  const heldRef = useRef<ActivityItem[]>([]);
+  const hasOlderRef = useRef(false);
+  // Where the next catch-up continues: the last first page's or catch-up's
+  // `catch_up_cursor`. Late rows are never the newest a catch-up gives, so the
+  // newest row held is not it.
+  const catchUpRef = useRef<string | null>(null);
+  // Counts replacements of the rows from the top; an older page read for the
+  // rows it replaced is dropped when it lands.
+  const rowsEpochRef = useRef(0);
   // A first-page load replaces the rows; a refresh that arrives meanwhile
   // waits for it and catches up from the page it lands.
   const pageLoadingRef = useRef(false);
@@ -229,6 +239,23 @@ export function ActivityTab({
     pendingRef.current = next;
     setPendingNew(next);
   }, []);
+  const commitHasOlder = useCallback((next: boolean) => {
+    hasOlderRef.current = next;
+    setHasOlder(next);
+  }, []);
+  // A page read from the top replaces the rows; every held arrival is in it or below it.
+  const replaceRows = useCallback((page: ActivityFeedPage, next: ActivityItem[] = page.items) => {
+    rowsEpochRef.current += 1;
+    heldRef.current = [];
+    catchUpRef.current = page.catch_up_cursor;
+    commitRows(next);
+  }, [commitRows]);
+  // Arrivals join the loaded rows in place, or are held while older pages remain.
+  const commitArrivals = useCallback((arrivals: ActivityItem[]) => {
+    const placed = placeArrivals(rowsRef.current, arrivals, hasOlderRef.current);
+    heldRef.current = [...placed.held, ...heldRef.current];
+    commitRows(placed.rows);
+  }, [commitRows]);
 
   // ── URL ⇄ filters ──
   // The URL changing under the tab (browser Back / Forward, a link) replaces
@@ -269,10 +296,10 @@ export function ActivityTab({
   const takePending = useCallback(() => {
     const arrivals = pendingRef.current;
     if (!arrivals.length) return;
-    commitRows(mergeNewer(rowsRef.current, arrivals));
+    commitArrivals(arrivals);
     setFresh(new Set(arrivals.map((row) => row.id)));
     commitPending([]);
-  }, [commitRows, commitPending]);
+  }, [commitArrivals, commitPending]);
 
   // Returning to a list that was at its top: it takes the rows that arrived
   // while the record was open, as it would have had it been on screen.
@@ -380,17 +407,18 @@ export function ActivityTab({
     setError(null);
     void (async () => {
       try {
-        let page = await query({ limit: Math.min(MAX_PAGE_SIZE, Math.max(PAGE_SIZE, target)) });
+        const top = await query({ limit: Math.min(MAX_PAGE_SIZE, Math.max(PAGE_SIZE, target)) });
         if (generation !== generationRef.current) return;
+        let page = top;
         let loaded = page.items;
         while (page.has_more && loaded.length < target && loaded.length) {
           page = await query({ before: loaded[loaded.length - 1].cursor, limit: MAX_PAGE_SIZE });
           if (generation !== generationRef.current) return;
           loaded = appendOlder(loaded, page.items);
         }
-        commitRows(loaded);
+        replaceRows(top, loaded);
         commitPending([]);
-        setHasOlder(page.has_more);
+        commitHasOlder(page.has_more);
         setFresh(new Set());
         setNow(Date.now());
         applyMeta(page);
@@ -421,7 +449,7 @@ export function ActivityTab({
         }
       }
     })();
-  }, [query, applyMeta, commitRows, commitPending, recoverCategories, filters]);
+  }, [query, applyMeta, replaceRows, commitPending, commitHasOlder, recoverCategories, filters]);
 
   const investigating = openId !== null;
 
@@ -461,34 +489,34 @@ export function ActivityTab({
     if (!investigating && restartHeldRef.current) refreshRef.current();
   }, [investigating]);
 
-  // Live refresh: fetch only rows newer than the newest one held, walking
-  // forward page by page so nothing between pages is skipped.
+  // Live refresh: fetch only rows recorded since the last read, from its
+  // catch-up cursor, walking forward page by page so nothing between pages is skipped.
   const catchUp = useCallback(async () => {
     if (pageLoadingRef.current) {
       refreshAfterPageRef.current = true;
       return;
     }
     const generation = generationRef.current;
-    const head = pendingRef.current[0] ?? rowsRef.current[0];
-    if (!head) {
+    let cursor = catchUpRef.current;
+    if (!cursor) {
+      // Nothing listed yet: read the newest page.
       const page = await query();
       if (generation !== generationRef.current) return;
-      commitRows(page.items);
-      setHasOlder(page.has_more);
+      replaceRows(page);
+      commitHasOlder(page.has_more);
       applyMeta(page);
       return;
     }
     if (restartHeldRef.current && openRef.current !== null) return;
     restartHeldRef.current = false;
-    let cursor = head.cursor;
     let newer: ActivityItem[] = [];
     let last: ActivityFeedPage | null = null;
     for (let pageIndex = 0; pageIndex < MAX_CATCH_UP_PAGES; pageIndex += 1) {
       last = await query({ after: cursor });
       if (generation !== generationRef.current) return;
       newer = [...last.items, ...newer];
-      if (!last.has_more || !last.items.length) break;
-      cursor = last.items[0].cursor;
+      cursor = last.catch_up_cursor ?? cursor;
+      if (!last.has_more) break;
     }
     if (!last) return;
     applyMeta(last);
@@ -503,22 +531,27 @@ export function ActivityTab({
       }
       const page = await query();
       if (generation !== generationRef.current) return;
-      commitRows(page.items);
+      replaceRows(page);
       commitPending([]);
-      setHasOlder(page.has_more);
+      commitHasOlder(page.has_more);
       applyMeta(page);
       return;
     }
+    // The arrivals are taken below, so the next catch-up continues past them,
+    // and past the rows this view hides.
+    catchUpRef.current = cursor;
+    const known = new Set([...rowsRef.current, ...pendingRef.current, ...heldRef.current].map((row) => row.id));
+    newer = newer.filter((row) => !known.has(row.id));
     if (!newer.length) return;
     // An open record holds arrivals, as a reader scrolled down does.
     if (atTopRef.current && openRef.current === null) {
-      commitRows(mergeNewer(rowsRef.current, [...newer, ...pendingRef.current]));
+      commitArrivals([...newer, ...pendingRef.current]);
       commitPending([]);
       setFresh((current) => new Set([...current, ...newer.map((row) => row.id)]));
     } else {
       commitPending(mergeNewer(pendingRef.current, newer));
     }
-  }, [query, applyMeta, commitRows, commitPending]);
+  }, [query, applyMeta, replaceRows, commitArrivals, commitPending, commitHasOlder]);
 
   const runRefresh = useCoalescedRunner(async () => {
     const generation = generationRef.current;
@@ -576,14 +609,21 @@ export function ActivityTab({
     const tail = rowsRef.current[rowsRef.current.length - 1];
     if (!tail || loadingOlderRef.current) return;
     const generation = generationRef.current;
+    const epoch = rowsEpochRef.current;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     setOlderError(null);
     try {
       const page = await query({ before: tail.cursor });
       if (generation !== generationRef.current) return;
-      commitRows(appendOlder(rowsRef.current, page.items));
-      setHasOlder(page.has_more);
+      // The rows were read again from the top meanwhile: this page extends rows no longer shown.
+      if (epoch !== rowsEpochRef.current) return;
+      // Held arrivals the page lists are taken from it; one it does not (recorded
+      // after the page was read) is placed once the rows reach below it.
+      const placed = placeArrivals(appendOlder(rowsRef.current, page.items), heldRef.current, page.has_more);
+      heldRef.current = placed.held;
+      commitRows(placed.rows);
+      commitHasOlder(page.has_more);
       applyMeta(page);
     } catch (cause) {
       if (generation === generationRef.current) setOlderError(errorText(cause, "Older activity could not be loaded"));
@@ -593,7 +633,7 @@ export function ActivityTab({
         setLoadingOlder(false);
       }
     }
-  }, [query, applyMeta, commitRows]);
+  }, [query, applyMeta, commitRows, commitHasOlder]);
 
   function showPending() {
     takePending();

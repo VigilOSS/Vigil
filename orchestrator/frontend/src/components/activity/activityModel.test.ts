@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivityEntity, ActivityItem } from "../../lib/activityApi";
-import { appendOlder, buildFeed, codeFileHref, dispatchSpanText, dispatchStatusEntry, entityHref, mergeNewer, type FeedEntry } from "./activityModel";
+import { appendOlder, buildFeed, codeFileHref, dispatchSpanText, dispatchStatusEntry, entityHref, mergeNewer, placeArrivals, type FeedEntry } from "./activityModel";
 
 const NOW = Date.parse("2026-10-20T15:00:00Z");
 
@@ -13,6 +13,7 @@ function item(at: string, overrides: Partial<ActivityItem> = {}): ActivityItem {
     source: "audit",
     source_id: id,
     cursor: `c${id}`,
+    order: [Date.parse(at) || 0, 1, id],
     occurred_at: at,
     actor: { name: "code-vuln-hunter", kind: "agent" },
     category: "code",
@@ -169,6 +170,76 @@ describe("page merging", () => {
     const fresh = item("2026-10-20T14:30:00Z");
     const merged = mergeNewer(loaded, [fresh, first[0]]);
     expect(merged.map((row) => row.id)).toEqual([fresh.id, first[0].id, first[1].id, older[0].id]);
+  });
+
+  it("places a row recorded late at its own time among the loaded rows", () => {
+    const loaded = [item("2026-10-20T14:00:00Z"), item("2026-10-20T13:00:00Z"), item("2026-10-20T12:00:00Z")];
+    const late = item("2026-10-20T13:30:00Z");
+    const tie = item("2026-10-20T13:00:00Z");
+    const fresh = item("2026-10-20T14:30:00Z");
+    const merged = mergeNewer(loaded, [fresh, late, tie]);
+    expect(merged.map((row) => row.id)).toEqual([fresh.id, loaded[0].id, late.id, tie.id, loaded[1].id, loaded[2].id]);
+  });
+
+  it("takes a row once when one arrival batch carries it twice", () => {
+    const loaded = [item("2026-10-20T13:00:00Z")];
+    const fresh = item("2026-10-20T14:00:00Z");
+    const repeat = { ...fresh, cursor: "an earlier read's cursor" };
+    const merged = mergeNewer(loaded, [fresh, repeat]);
+    expect(merged.map((row) => row.id)).toEqual([fresh.id, loaded[0].id]);
+    expect(merged[0].cursor).toBe(fresh.cursor);
+  });
+
+  it("places a row whose time does not parse last, where the feed sorts it", () => {
+    const loaded = [item("2026-10-20T14:00:00Z"), item("2026-10-20T13:00:00Z")];
+    const undated = item("not a time");
+    expect(mergeNewer(loaded, [undated]).map((row) => row.id)).toEqual([loaded[0].id, loaded[1].id, undated.id]);
+  });
+
+  it("places arrivals by the feed's order key, whatever time they show", () => {
+    const loaded = [item("2026-10-20T14:00:00Z"), item("2026-10-20T13:00:00Z")];
+    // The backend could not date this stamp (instant 0) though it renders as a time.
+    const undatable = item("2026-10-20T13:30:00Z", { order: [0, 1, 99] });
+    // Same displayed time as the loaded tail, but below it in the feed (an event).
+    const event = item("2026-10-20T13:00:00Z", { source: "event", order: [loaded[1].order[0], 0, 98] });
+    expect(mergeNewer(loaded, [undatable, event]).map((row) => row.id)).toEqual([loaded[0].id, loaded[1].id, event.id, undatable.id]);
+    // While older rows remain, both lie below the tail: the older pages list them.
+    const held = placeArrivals(loaded, [undatable, event], true);
+    expect(held.rows).toEqual(loaded);
+    expect(held.held.map((row) => row.id)).toEqual([undatable.id, event.id]);
+  });
+
+  it("holds an arrival older than the loaded tail while older pages remain, since one of them lists it", () => {
+    const loaded = [item("2026-10-20T14:00:00Z"), item("2026-10-20T13:00:00Z")];
+    const fresh = item("2026-10-20T14:30:00Z");
+    const between = item("2026-10-20T13:30:00Z");
+    const atTail = item("2026-10-20T13:00:00Z");
+    const below = item("2026-10-20T12:00:00Z");
+
+    const held = placeArrivals(loaded, [fresh, between, atTail, below, below], true);
+    expect(held.rows.map((row) => row.id)).toEqual([fresh.id, loaded[0].id, between.id, atTail.id, loaded[1].id]);
+    expect(held.held.map((row) => row.id)).toEqual([below.id]);
+
+    // With every older row loaded, it is the new tail.
+    const placed = placeArrivals(loaded, [fresh, below], false);
+    expect(placed.rows.map((row) => row.id)).toEqual([fresh.id, loaded[0].id, loaded[1].id, below.id]);
+    expect(placed.held).toEqual([]);
+  });
+
+  it("places a held row an older page did not list once that page reaches below it", () => {
+    const loaded = [item("2026-10-20T14:00:00Z")];
+    const late = item("2026-10-20T13:30:00Z");
+    const listed = item("2026-10-20T13:10:00Z");
+    // This older page was read before the late row was recorded.
+    const older = [item("2026-10-20T13:45:00Z"), item("2026-10-20T13:15:00Z")];
+    const deeper = item("2026-10-20T12:00:00Z");
+
+    const merged = placeArrivals(appendOlder(loaded, older), [late, listed, deeper], true);
+    expect(merged.rows.map((row) => row.id)).toEqual([loaded[0].id, older[0].id, late.id, older[1].id]);
+    expect(merged.held.map((row) => row.id)).toEqual([listed.id, deeper.id]);
+    // A held row the next page lists is taken once, from that page.
+    const next = placeArrivals(appendOlder(merged.rows, [listed]), merged.held, false);
+    expect(next.rows.map((row) => row.id)).toEqual([loaded[0].id, older[0].id, late.id, older[1].id, listed.id, deeper.id]);
   });
 });
 

@@ -7,8 +7,12 @@ spelling: ``events.created_at`` is SQLite ``YYYY-MM-DD HH:MM:SS`` while
 from __future__ import annotations
 
 import json
+import sqlite3
+
+import pytest
 
 from app import db
+from app.services import activity_feed
 from tests.test_engagements_api import write_engagement
 
 
@@ -191,6 +195,245 @@ def test_feed_cursor_pages_are_gap_free_in_both_directions(client, isolate_setti
             break
         cursor = page["items"][0]["cursor"]
     assert newer == full[:5]
+
+
+def _catch_up(client, head: str, **params) -> list[str]:
+    """What a live refresh holding ``head`` receives: every page newer than it, newest first,
+    each read continuing from the previous one's ``catch_up_cursor``."""
+    newer: list[str] = []
+    cursor = head
+    for _ in range(10):
+        page = _feed(client, after=cursor, **params)
+        newer = [item["id"] for item in page["items"]] + newer
+        cursor = page["catch_up_cursor"]
+        if not page["has_more"]:
+            return newer
+    raise AssertionError("catch-up did not settle")
+
+
+def test_feed_catch_up_delivers_a_row_recorded_after_its_instant(client, isolate_settings):
+    """A queued logger dates a row by when its call finished, after newer rows were read.
+
+    A live refresh still receives it once, beside the rows that arrived with it."""
+    engagement_id = _seed(client, isolate_settings)
+    _audit(engagement_id, "2026-04-17T12:00:00Z", "Note A", actor_kind="agent", actor_name="recon-specialist")
+    _audit(engagement_id, "2026-04-17T12:00:40Z", "Note B", actor_kind="agent", actor_name="fuzzer")
+    head = _feed(client)["items"][0]["cursor"]
+
+    late = _audit(engagement_id, "2026-04-17T12:00:05Z", "Note late", actor_kind="agent", actor_name="recon-specialist")
+    newer = _event(engagement_id, "2026-04-17 12:00:50", "chain.created", task_name="acme-chain")
+
+    page = _feed(client, after=head)
+    assert [item["id"] for item in page["items"]] == [f"event:{newer}", f"audit:{late}"]
+    assert page["has_more"] is False
+    assert page["catch_up_cursor"] == page["items"][0]["cursor"]
+    assert _feed(client, after=page["catch_up_cursor"])["items"] == []
+    # The full read lists it by its instant.
+    assert [item["id"] for item in _feed(client)["items"]][-2] == f"audit:{late}"
+
+
+def test_feed_catch_up_walks_many_late_rows_without_gaps(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    _audit(engagement_id, "2026-04-17T12:01:00Z", "Head", actor_kind="agent", actor_name="fuzzer")
+    head = _feed(client)["items"][0]["cursor"]
+    late = [
+        f"audit:{_audit(engagement_id, f'2026-04-17T12:00:{second:02d}Z', f'Late {second}', actor_kind='agent', actor_name='fuzzer')}"
+        for second in (30, 10, 50, 20, 40)
+    ]
+
+    received = _catch_up(client, head, limit=2)
+
+    assert sorted(received) == sorted(late) and len(received) == len(late)
+    assert _catch_up(client, _feed(client, after=head, limit=50)["catch_up_cursor"]) == []
+
+
+def test_feed_catch_up_of_only_late_rows_continues_past_them(client, isolate_settings):
+    """A refresh that gains only late rows lists no row newer than its head; the next
+    refresh continues from the response's catch-up cursor and receives nothing again."""
+    engagement_id = _seed(client, isolate_settings)
+    _audit(engagement_id, "2026-04-17T12:00:00Z", "Note A", actor_kind="agent", actor_name="recon-specialist")
+    _audit(engagement_id, "2026-04-17T12:00:40Z", "Note B", actor_kind="agent", actor_name="fuzzer")
+    head = _feed(client)["items"][0]
+    late = _audit(engagement_id, "2026-04-17T12:00:05Z", "Note late", actor_kind="agent", actor_name="recon-specialist")
+
+    page = _feed(client, after=head["cursor"])
+
+    assert [item["id"] for item in page["items"]] == [f"audit:{late}"]
+    assert _feed(client, after=page["catch_up_cursor"])["items"] == []
+    # Rows recorded after that refresh still arrive, once.
+    newer = _audit(engagement_id, "2026-04-17T12:00:50Z", "Note C", actor_kind="agent", actor_name="fuzzer")
+    assert _catch_up(client, page["catch_up_cursor"]) == [f"audit:{newer}"]
+
+
+def test_feed_catch_up_cursor_moves_past_rows_the_view_hides(client, isolate_settings):
+    """Tool calls hidden by the view still advance the catch-up cursor's watermark, so the
+    next refresh reads only what was recorded since, not every hidden row again."""
+    engagement_id = _seed(client, isolate_settings)
+    _audit(engagement_id, "2026-04-17T12:01:00Z", "Head", actor_kind="agent", actor_name="fuzzer")
+    first = _feed(client)
+    for second in range(5):
+        _audit(engagement_id, f"2026-04-17T12:00:{second:02d}Z", "Bash", actor_kind="hook", actor_name="fuzzer",
+               action="bash: nmap acme.example")
+
+    page = _feed(client, after=first["catch_up_cursor"])
+
+    assert page["items"] == [] and page["has_more"] is False
+    assert page["catch_up_cursor"] != first["catch_up_cursor"]
+    assert _feed(client, after=page["catch_up_cursor"], category="tools")["items"] == []
+    late = _audit(engagement_id, "2026-04-17T12:00:30Z", "Note late", actor_kind="agent", actor_name="fuzzer")
+    assert _catch_up(client, page["catch_up_cursor"]) == [f"audit:{late}"]
+
+
+def test_feed_catch_up_cursor_is_given_where_a_refresh_can_start(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    empty = _feed(client)
+    assert (empty["items"], empty["catch_up_cursor"]) == ([], None)
+    for second in range(3):
+        _audit(engagement_id, f"2026-04-17T12:00:0{second}Z", f"Note {second}", actor_kind="agent", actor_name="fuzzer")
+    top = _feed(client, limit=2)
+    assert top["catch_up_cursor"] == top["items"][0]["cursor"]
+    # An older page is no place to catch up from.
+    assert _feed(client, before=top["items"][-1]["cursor"])["catch_up_cursor"] is None
+
+
+def test_feed_items_carry_the_order_the_feed_sorts_by(client, isolate_settings):
+    """``order`` is the feed's total order key, [instant, source rank, id]: rows sharing an
+    instant list audit before event and newer ids first, and an undated row sorts as instant 0."""
+    engagement_id = _seed(client, isolate_settings)
+    _event(engagement_id, "2026-04-17 12:00:00", "chain.created", task_name="tie")
+    _audit(engagement_id, "2026-04-17T12:00:00Z", "Tie note", actor_kind="agent", actor_name="fuzzer")
+    _audit(engagement_id, "2026-04-17T12:00:00+00:00", "Tie note 2", actor_kind="agent", actor_name="fuzzer")
+    _audit(engagement_id, "not a time", "Undated note", actor_kind="agent", actor_name="fuzzer")
+    _audit(engagement_id, "2026-04-17T12:00:00.0004Z", "Sub-millisecond note", actor_kind="agent", actor_name="fuzzer")
+
+    items = _feed(client)["items"]
+
+    orders = [tuple(item["order"]) for item in items]
+    assert orders == sorted(orders, reverse=True) and len(set(orders)) == len(orders)
+    assert [(item["source"], item["source_id"]) == (["audit", "event"][1 - order[1]], order[2])
+            for item, order in zip(items, orders)] == [True] * len(items)
+    assert items[-1]["kind"] == "Undated note" and items[-1]["order"][0] == 0
+
+
+def test_feed_catch_up_applies_the_page_filters_to_late_rows(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    _audit(engagement_id, "2026-04-17T12:01:00Z", "Head", actor_kind="agent", actor_name="fuzzer")
+    head = _feed(client)["items"][0]["cursor"]
+    tool = _audit(engagement_id, "2026-04-17T12:00:30Z", "Bash", actor_kind="hook", actor_name="fuzzer",
+                  action="bash: nmap acme.example")
+
+    # Tool calls are hidden by default, late or not.
+    assert _feed(client, after=head)["items"] == []
+    assert [item["id"] for item in _feed(client, after=head, category="tools")["items"]] == [f"audit:{tool}"]
+
+
+def test_feed_shows_a_late_logged_call_once(client, isolate_settings):
+    """`vigil assess log` mirrors its row as an activity.recorded event when it records it;
+    a row dated by its call's finish, long before, is still listed once."""
+    engagement_id = _seed(client, isolate_settings)
+    row = _audit(engagement_id, "2026-04-17T12:00:00.250Z", "Bash", actor_kind="hook", actor_name="recon-specialist",
+                 action="bash: nmap acme.example")
+    _event(engagement_id, "2026-04-17 12:00:45", "activity.recorded", task_name="activity-entry",
+           agent_name="recon-specialist", summary="Bash")
+
+    payload = _feed(client, category="tools,notes")
+
+    assert [item["id"] for item in payload["items"]] == [f"audit:{row}"]
+    assert payload["total"] == 1
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{}, {"actor": "agent"}, {"category": "notes,tools"}],
+    ids=["default", "actor", "categories"],
+)
+def test_feed_pages_older_rows_from_a_late_row_at_its_own_place(client, isolate_settings, params):
+    """A row recorded late can become the oldest row a client holds, with older history
+    unloaded or with all of it loaded. Paging older from its cursor lists the rows below
+    it in feed order, never rows above it, under the client's filters."""
+    engagement_id = _seed(client, isolate_settings)
+    for second in range(10, 20):
+        _audit(engagement_id, f"2026-04-17T12:00:{second}Z", f"Note {second}", actor_kind="agent", actor_name="recon-specialist")
+        _audit(engagement_id, f"2026-04-17T12:00:{second}.500Z", "Bash", actor_kind="hook", actor_name="recon-specialist",
+               action="bash: nmap acme.example")
+    head = _feed(client, limit=3, **params)["items"][0]["cursor"]
+
+    late = _audit(engagement_id, "2026-04-17T12:00:15.250Z", "Late note", actor_kind="agent", actor_name="recon-specialist")
+    page = _feed(client, after=head, **params)
+    assert [item["id"] for item in page["items"]] == [f"audit:{late}"]
+    full = [item["id"] for item in _feed(client, limit=500, **params)["items"]]
+    below = full[full.index(f"audit:{late}") + 1:]
+    assert below
+    older = _feed(client, before=page["items"][0]["cursor"], limit=500, **params)
+    assert [item["id"] for item in older["items"]] == below
+    assert older["has_more"] is False
+
+    # Older than every row: nothing lies below it.
+    oldest = _audit(engagement_id, "2026-04-17T11:00:00Z", "Oldest late note", actor_kind="agent", actor_name="recon-specialist")
+    page = _feed(client, after=page["catch_up_cursor"], **params)
+    assert [item["id"] for item in page["items"]] == [f"audit:{oldest}"]
+    bottom = _feed(client, before=page["items"][0]["cursor"], **params)
+    assert (bottom["items"], bottom["has_more"]) == ([], False)
+    assert _feed(client, after=page["catch_up_cursor"], **params)["items"] == []
+
+
+def test_feed_accepts_cursors_without_a_watermark(client, isolate_settings):
+    engagement_id = _seed(client, isolate_settings)
+    for second in range(5):
+        _audit(engagement_id, f"2026-04-17T12:00:0{second}Z", f"Note {second}", actor_kind="agent", actor_name="recon-specialist")
+    full = _feed(client)["items"]
+    anchor = full[2]["cursor"]
+    position = "~".join(anchor.split("~")[:3])
+
+    for cursor in (anchor, position):
+        assert [item["id"] for item in _feed(client, before=cursor)["items"]] == [item["id"] for item in full[3:]]
+        assert [item["id"] for item in _feed(client, after=cursor)["items"]] == [item["id"] for item in full[:2]]
+    for malformed in (
+        f"{anchor}~1",
+        f"{anchor}~{position.split('~')[0]}~audit",
+        f"{position}~-1",
+        f"{anchor}~{position}",
+    ):
+        response = client.get(FEED, params={"after": malformed})
+        assert response.status_code == 422, malformed
+
+
+def test_feed_read_is_one_snapshot_so_a_row_committed_meanwhile_is_delivered_once(
+    client, isolate_settings, monkeypatch
+):
+    """Another lane's `vigil assess log` can commit while a refresh is mid-read; the
+    read's watermark and its pages agree, so later refreshes deliver that row once."""
+    engagement_id = _seed(client, isolate_settings)
+    _audit(engagement_id, "2026-04-17T12:00:00Z", "Head", actor_kind="agent", actor_name="recon-specialist")
+    head = _feed(client)["items"][0]["cursor"]
+    concurrent: list[str] = []
+    original = activity_feed._watermark
+
+    def watermark_then_another_lane_writes(connection, *args):
+        value = original(connection, *args)
+        if not concurrent:
+            other = sqlite3.connect(db.database_path())
+            try:
+                for stamp, title in (("2026-04-17T12:00:30Z", "Concurrent"), ("2026-04-17T12:00:40Z", "Concurrent 2")):
+                    row = other.execute(
+                        "INSERT INTO activity_entries (engagement_id, occurred_at, actor_kind, actor_name, title) "
+                        "VALUES (?, ?, 'agent', 'fuzzer', ?)",
+                        (engagement_id, stamp, title),
+                    )
+                    other.commit()
+                    concurrent.append(f"audit:{row.lastrowid}")
+            finally:
+                other.close()
+        return value
+
+    monkeypatch.setattr(activity_feed, "_watermark", watermark_then_another_lane_writes)
+    delivered: list[str] = []
+    for _ in range(3):
+        page = _feed(client, after=head)
+        delivered += [item["id"] for item in page["items"]]
+        head = page["catch_up_cursor"]
+
+    assert sorted(delivered) == sorted(concurrent)
 
 
 def test_feed_keeps_rows_with_unparseable_timestamps_as_oldest(client, isolate_settings):
@@ -792,3 +1035,75 @@ def test_entry_lookup_refuses_a_malformed_id(client, isolate_settings):
         assert response.status_code == 422, f"{entry_id}: {response.status_code} {response.text}"
         detail = response.json()["detail"]
         assert "audit:<id>" in detail and "event:<id>" in detail
+
+
+def test_feed_category_counts_equal_the_categories_of_the_rows_listed(client, isolate_settings):
+    """Every category count is the number of rows the feed lists in it, under every filter.
+
+    The rows cover each category from both sources, hook lifecycle rows matched by
+    title prefix and by exact title, actor identities of every derived kind, an
+    undated row, a mirrored ``finding.created`` event and an ``activity.recorded``
+    copy (both listed nowhere, so counted nowhere).
+    """
+    engagement_id = _seed(client, isolate_settings)
+    stamp = iter(f"2026-04-17T12:{minute:02d}:00Z" for minute in range(60))
+    for title, actor_kind, actor_name in (
+        ("Bash", "hook", "HUNT-01"),
+        ("Read", "hook", "HUNT-02"),
+        ("Bash", "hook", "operator"),
+        ("Bash", "hook", "acme-hook"),
+        ("Dispatch: HUNT-01", "hook", "HUNT-01"),
+        ("Client session ended", "hook", "HUNT-02"),
+        ("agent decision", "system", "vigil-assess"),
+        ("agent start", "system", "code-vuln-hunter"),
+        ("update-finding", "system", "vulnerability-analyst"),
+        ("code-dispatch done", "system", "HUNT-01"),
+        ("code-record analysis", "system", ""),
+        ("artifact register", "system", "web-ui"),
+        ("Submission recorded", "system", "system"),
+        ("Recon notes", "agent", "recon-specialist"),
+        ("Operator note", "operator", "operator"),
+        ("Unclassified system row", "system", "unknown"),
+    ):
+        _audit(engagement_id, next(stamp), title, actor_kind=actor_kind, actor_name=actor_name)
+    _audit(engagement_id, "not a time", "Undated note", actor_kind="agent", actor_name="recon-specialist")
+    _audit(
+        engagement_id, "2026-04-17T13:00:00Z", "finding-record",
+        actor_name="vulnerability-analyst", metadata={"finding_slug": "VA-001"},
+    )
+    for event_type, agent_name in (
+        ("finding.created", "vulnerability-analyst"),
+        ("chain.created", "operator"),
+        ("surface.updated", "recon-specialist"),
+        ("intel.recorded", "system"),
+        ("phase.started", "operator"),
+        ("verification_decision", "vigil-assess"),
+        ("code_analysis.updated", "HUNT-01"),
+        ("artifact.updated", "operator"),
+        ("report.generated", ""),
+        ("something.else", "recon-specialist"),
+        ("activity.recorded", "HUNT-01"),
+    ):
+        _event(engagement_id, "2026-04-17 13:30:00", event_type, task_name="task", agent_name=agent_name)
+    _event(engagement_id, "2026-04-17 13:30:01", "artifact.updated", task_name="log.md", agent_name="operator")
+    _event(engagement_id, "2026-04-17 13:00:01", "finding.created", task_name="VA-001", agent_name="vulnerability-analyst")
+
+    every = ",".join(sorted({c["key"] for c in _feed(client)["categories"]}))
+    for filters in (
+        {},
+        {"actor": "agent"},
+        {"actor": "system"},
+        {"actor": "operator"},
+        {"since": "2026-04-17T12:05:00Z", "until": "2026-04-17T13:00:00Z"},
+        {"q": "HUNT-01"},
+    ):
+        listed = _feed(client, category=every, limit=500, **filters)
+        assert not listed["has_more"]
+        expected = {key: 0 for key in every.split(",")}
+        for item in listed["items"]:
+            expected[item["category"]] += 1
+        assert {c["key"]: c["count"] for c in listed["categories"]} == expected, filters
+        assert listed["total"] == len(listed["items"]), filters
+        default_view = _feed(client, **filters)
+        assert default_view["total"] == len(listed["items"]) - expected["tools"], filters
+        assert default_view["categories"] == listed["categories"], filters

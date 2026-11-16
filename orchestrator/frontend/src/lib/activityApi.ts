@@ -36,8 +36,10 @@ export type ActivityItem = {
   id: string;
   source: "audit" | "event";
   source_id: number;
-  /** Opaque position in the feed order, for `before` / `after`. */
+  /** Opaque position in the feed order, for `before`. */
   cursor: string;
+  /** The feed's total order key, [instant, source rank, id]: rows list in it, descending. */
+  order: [number, number, number];
   /** ISO-8601 UTC. */
   occurred_at: string;
   actor: { name: string; kind: ActivityActorKind };
@@ -65,6 +67,11 @@ export type ActivityFeedPage = {
   items: ActivityItem[];
   /** More rows remain in the requested direction (older, or newer for `after`). */
   has_more: boolean;
+  /**
+   * Where the next live catch-up (`after`) continues: given on a first page that lists a
+   * row and on every catch-up, including one that lists none; null on an older page.
+   */
+  catch_up_cursor: string | null;
   /** Rows matching every filter, including the category selection. */
   total: number;
   categories: ActivityCategory[];

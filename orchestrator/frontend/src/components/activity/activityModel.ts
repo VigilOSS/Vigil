@@ -1,6 +1,8 @@
 // Pure shaping for the Activity view: page merging, day groups, dispatch
-// cards, and burst folding. Rows arrive newest first in the backend's total
-// order; nothing here re-sorts them, so loaded pages stay exactly in feed order.
+// cards, and burst folding. Pages arrive newest first in the backend's total
+// order and are kept in that order. Live arrivals are placed among them by
+// that order's key (`order`), because a row can be recorded after newer rows
+// were read; one below every loaded row waits for the older page that lists it.
 
 import type { ActivityEntity, ActivityEntityRef, ActivityItem } from "../../lib/activityApi";
 import { formatAbsoluteTime, formatDuration, serverTimeMs } from "../../lib/serverTime";
@@ -83,11 +85,60 @@ export type DayGroup = {
 
 // ── Paging ─────────────────────────────────────────────────────────────
 
-/** Newer rows (newest first) go on top; rows already loaded keep their place. */
+/** Whether `a` lists above `b` in the feed: its order key ([instant, source rank, id]) is greater. */
+function above(a: ActivityItem, b: ActivityItem): boolean {
+  for (let index = 0; index < 3; index += 1) {
+    if (a.order[index] !== b.order[index]) return a.order[index] > b.order[index];
+  }
+  return false;
+}
+
+/** The rows once each, in order: the first copy wins, the newest read's in an arrival batch. */
+function uniqueRows(rows: ActivityItem[]): ActivityItem[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+}
+
+/**
+ * Arrivals take their place in feed order, above every loaded row they list
+ * above, so a row recorded late lands where a reload would show it. Rows
+ * already loaded keep their order; a row is taken once.
+ */
 export function mergeNewer(current: ActivityItem[], newer: ActivityItem[]): ActivityItem[] {
   const known = new Set(current.map((row) => row.id));
-  const fresh = newer.filter((row) => !known.has(row.id));
-  return fresh.length ? [...fresh, ...current] : current;
+  const fresh = uniqueRows(newer).filter((row) => !known.has(row.id));
+  if (!fresh.length) return current;
+  const merged = [...current];
+  for (const row of fresh) {
+    const index = merged.findIndex((loaded) => above(row, loaded));
+    merged.splice(index === -1 ? merged.length : index, 0, row);
+  }
+  return merged;
+}
+
+/** Loaded rows, and arrivals held for the older pages that list them. */
+export type Placement = { rows: ActivityItem[]; held: ActivityItem[] };
+
+/**
+ * Arrivals placed among the loaded rows (`mergeNewer`). While older pages
+ * remain, one below the loaded tail is held instead: as the tail, the
+ * next older page would start below it and skip the unloaded rows between,
+ * and that page lists it in its place anyway. A held row is offered again with
+ * each older page, which places it once the loaded rows reach below it.
+ */
+export function placeArrivals(current: ActivityItem[], arrivals: ActivityItem[], olderRemain: boolean): Placement {
+  const tail = current[current.length - 1];
+  if (!olderRemain || !tail) return { rows: mergeNewer(current, arrivals), held: [] };
+  const known = new Set(current.map((row) => row.id));
+  const fresh = uniqueRows(arrivals).filter((row) => !known.has(row.id));
+  return {
+    rows: mergeNewer(current, fresh.filter((row) => above(row, tail))),
+    held: fresh.filter((row) => above(tail, row)),
+  };
 }
 
 /** An older page goes underneath, skipping anything already loaded. */

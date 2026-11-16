@@ -63,6 +63,8 @@ class ActivityFeedItem(BaseModel):
     source: Literal["audit", "event"]
     source_id: int
     cursor: str
+    # The feed's total order key, [instant, source rank, id]; items list in it descending.
+    order: tuple[float, int, int]
     occurred_at: str
     actor: ActivityFeedActor
     category: str
@@ -84,6 +86,8 @@ class ActivityFeedCategory(BaseModel):
 class ActivityFeedResponse(BaseModel):
     items: list[ActivityFeedItem]
     has_more: bool
+    # Where the next live catch-up (`after`) continues; set on a first page and every catch-up.
+    catch_up_cursor: str | None
     total: int
     categories: list[ActivityFeedCategory]
 

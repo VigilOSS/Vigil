@@ -28,6 +28,7 @@ from app import db as db_module
 from app.services import activity as activity_service
 from app.services import activity_feed
 from app.services import events as events_service
+from app.services import code_analysis
 from app.services import code_analysis_support
 from app.services import submission_versions
 from app.services import state_manager
@@ -83,9 +84,17 @@ _HOT_PATH_INDEXES: dict[str, tuple[str, list[str | None]]] = {
         "events",
         ["engagement_id", None, "id"],
     ),
+    "idx_events_engagement_feed_julianday": (
+        "events",
+        ["engagement_id", None, "id"],
+    ),
     "idx_assessment_request_observations_variant": (
         "assessment_request_observations",
         ["request_variant_id", "created_at", "id"],
+    ),
+    "idx_code_analysis_queue_pending_claim": (
+        "code_analysis_queue",
+        ["engagement_id", "priority", "id"],
     ),
     "idx_code_analysis_results_queue_receipt": (
         "code_analysis_results",
@@ -114,6 +123,7 @@ def _assert_hot_path_indexes(db_path: Path) -> None:
         for name, expression in (
             ("idx_activity_entries_engagement_julianday", "julianday(occurred_at)"),
             ("idx_events_engagement_julianday", "julianday(created_at)"),
+            ("idx_events_engagement_feed_julianday", "julianday(created_at)"),
         ):
             expression_sql = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE name = ?", (name,)
@@ -462,7 +472,9 @@ def test_activity_feed_category_counts_read_only_the_actor_title_index(
     """Every Activity page load counts the audit log by category.
 
     The category and actor-kind expressions read only actor and title, so the
-    unfiltered count stays index-only instead of visiting every audit row.
+    unfiltered count stays index-only instead of visiting every audit row. The
+    rows are counted per actor and title in index order, so the category
+    expression is evaluated once per distinct actor and title, not once per row.
     """
     engagement_id = _seeded_engagement_id(client, isolate_settings)
 
@@ -478,11 +490,37 @@ def test_activity_feed_category_counts_read_only_the_actor_title_index(
 
     assert plans == [
         [
+            "CO-ROUTINE a",
             "SEARCH a USING COVERING INDEX idx_activity_entries_engagement_kind_title "
             "(engagement_id=?)",
+            "SCAN a",
             "USE TEMP B-TREE FOR GROUP BY",
         ]
     ] * 2
+
+
+def test_activity_feed_never_walks_the_activity_copies_of_events(
+    client, isolate_settings
+) -> None:
+    """Every hook-logged tool call also stores an ``activity.recorded`` event,
+    which the feed never lists or counts; its event pages and counts read an
+    index that holds no such rows."""
+    engagement_id = _seeded_engagement_id(client, isolate_settings)
+
+    with _captured_statements() as (connection, statements):
+        activity_feed.list_activity_feed(engagement_id)
+        activity_feed.list_activity_feed(engagement_id, actor="system", categories=["tools", "notes"])
+
+    plans = _plans_for(
+        connection,
+        statements,
+        lambda sql: "FROM events e" in sql and "event_type != 'activity.recorded'" in sql,
+    )
+
+    for plan in plans:
+        event_lines = [line for line in plan if re.match(r"^(?:SCAN|SEARCH) e\b", line)]
+        assert event_lines, plan
+        assert all("idx_events_engagement_feed_julianday" in line for line in event_lines), plan
 
 
 def test_activity_feed_and_timeline_read_events_in_index_order(
@@ -510,11 +548,79 @@ def test_activity_feed_and_timeline_read_events_in_index_order(
         and "ORDER BY julianday(created_at) DESC" in sql,
     )
 
-    plans = [*feed_pages, *stored_timeline]
-    assert len(plans) == 3, plans
-    for plan in plans:
+    assert len(feed_pages) == 2, feed_pages
+    assert len(stored_timeline) == 1, stored_timeline
+    for plan in feed_pages:
+        assert any("idx_events_engagement_feed_julianday" in line for line in plan), plan
+    for plan in stored_timeline:
         assert any("idx_events_engagement_julianday" in line for line in plan), plan
+    for plan in [*feed_pages, *stored_timeline]:
         assert not any("TEMP B-TREE FOR ORDER BY" in line for line in plan), plan
+
+
+def test_activity_feed_catch_up_seeks_rows_recorded_since_its_cursor(client, isolate_settings) -> None:
+    """A live refresh also reads the audit rows recorded since its cursor; it seeks them
+    by id rather than walking every older row by instant."""
+    engagement_id = _seeded_engagement_id(client, isolate_settings)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "INSERT INTO activity_entries (engagement_id, occurred_at, actor_kind, actor_name, title) "
+            "VALUES (?, '2026-04-17T12:00:00Z', 'agent', 'recon-specialist', 'Acme note')",
+            (engagement_id,),
+        )
+
+    with _captured_statements() as (connection, statements):
+        activity_feed.list_activity_feed(engagement_id, after="2461000.5~audit~1~0", limit=5)
+
+    gained = _plans_for(connection, statements, lambda sql: "a.id >" in sql and "a.id <=" in sql)
+    assert len(gained) == 2, gained
+    for plan in gained:
+        assert plan == ["SEARCH a USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)"], plan
+
+
+def test_activity_feed_catch_up_skips_rows_the_view_hid_last_time(client, isolate_settings) -> None:
+    """Tool calls hidden by the default view are read once: the refresh that passes over
+    them hands back a catch-up cursor past them, so the next reads no recorded-since rows."""
+    engagement_id = _seeded_engagement_id(client, isolate_settings)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "INSERT INTO activity_entries (engagement_id, occurred_at, actor_kind, actor_name, title) "
+            "VALUES (?, '2026-04-17T12:00:00Z', 'agent', 'recon-specialist', 'Acme note')",
+            (engagement_id,),
+        )
+    head = activity_feed.list_activity_feed(engagement_id)["catch_up_cursor"]
+    with db_module.get_connection() as connection:
+        connection.executemany(
+            "INSERT INTO activity_entries (engagement_id, occurred_at, actor_kind, actor_name, title, action) "
+            "VALUES (?, '2026-04-17T11:00:00Z', 'hook', 'HUNT-01', 'Bash', 'bash: id')",
+            [(engagement_id,)] * 50,
+        )
+    passed = activity_feed.list_activity_feed(engagement_id, after=head)
+    assert passed["items"] == []
+
+    with _captured_statements() as (connection, statements):
+        activity_feed.list_activity_feed(engagement_id, after=passed["catch_up_cursor"])
+
+    assert not [sql for sql in statements if "a.id >" in sql and "a.id <=" in sql]
+
+
+def test_activity_feed_watermark_reads_one_row(client, isolate_settings) -> None:
+    """Every feed page and entry read takes its audit watermark; it is the table's
+    highest id, one seek, not a walk over the engagement's whole tool-call log."""
+    engagement_id = _seeded_engagement_id(client, isolate_settings)
+    with db_module.get_connection() as connection:
+        entry_id = connection.execute(
+            "INSERT INTO activity_entries (engagement_id, occurred_at, actor_kind, actor_name, title) "
+            "VALUES (?, '2026-04-17T12:00:00Z', 'agent', 'recon-specialist', 'Acme note')",
+            (engagement_id,),
+        ).lastrowid
+
+    with _captured_statements() as (connection, statements):
+        activity_feed.list_activity_feed(engagement_id)
+        activity_feed.get_activity_entry(engagement_id, f"audit:{entry_id}")
+
+    plans = _plans_for(connection, statements, lambda sql: "MAX(id)" in sql)
+    assert plans == [["SEARCH activity_entries"]] * 2, plans
 
 
 def test_submission_attachment_counts_seek_their_indexes(client, isolate_settings) -> None:
@@ -580,6 +686,36 @@ def test_submission_attachment_counts_seek_their_indexes(client, isolate_setting
             "(engagement_id=? AND relative_path>? AND relative_path<?)"
         ]
     ]
+
+
+def test_queue_claim_reads_pending_rows_in_claim_order(client, isolate_settings) -> None:
+    """A claim walks the pending rows in claim order and stops at its limit.
+
+    Every `code-dispatch fetch` holds the write lock while it selects, so a
+    claim that read every attempt the queue ever held and sorted them would
+    stall every other lane's write for as long as the queue is long.
+    """
+    engagement_id = _seeded_engagement_id(client, isolate_settings)
+
+    plans: list[list[str]] = []
+    for filters in ({}, {"classification": "high", "path_prefix": ["src/acme"]}):
+        # Each claim is its own transaction, as each request's is.
+        with _captured_statements() as (connection, statements):
+            code_analysis.fetch_queue_items(engagement_id, limit=3, agent_name="HUNT-01", **filters)
+        plans += _plans_for(
+            connection,
+            statements,
+            lambda sql: "ORDER BY queue.priority DESC, queue.id ASC" in sql
+            and "queue.status = 'pending'" in sql,
+        )
+
+    assert len(plans) == 2, plans
+    for plan in plans:
+        assert any(
+            line.startswith("SEARCH queue USING INDEX idx_code_analysis_queue_pending_claim")
+            for line in plan
+        ), plan
+        assert not any("TEMP B-TREE FOR ORDER BY" in line for line in plan), plan
 
 
 def test_suspicious_analysis_counts_seek_results_by_queue_item(

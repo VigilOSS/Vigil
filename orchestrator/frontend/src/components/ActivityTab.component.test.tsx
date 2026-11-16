@@ -28,6 +28,7 @@ function row(id: number, at: string, overrides: Partial<ActivityItem> = {}): Act
     source: "audit",
     source_id: id,
     cursor: `cursor-${id}`,
+    order: [Date.parse(at) || 0, 1, id],
     occurred_at: at,
     actor: { name: "recon-specialist", kind: "agent" },
     category: "notes",
@@ -40,8 +41,9 @@ function row(id: number, at: string, overrides: Partial<ActivityItem> = {}): Act
   };
 }
 
-function page(items: ActivityItem[], hasMore = false, total = 9): ActivityFeedPage {
-  return { items, has_more: hasMore, total, categories: CATEGORIES };
+/** A feed page; its catch-up cursor defaults to its newest row's, as the backend's is without late rows. */
+function page(items: ActivityItem[], hasMore = false, total = 9, catchUp = items[0]?.cursor ?? null): ActivityFeedPage {
+  return { items, has_more: hasMore, catch_up_cursor: catchUp, total, categories: CATEGORIES };
 }
 
 function summaryText() {
@@ -55,6 +57,8 @@ function deferred<T>() {
 }
 
 const note = (id: number) => `Note ${id} about the Acme portal`;
+/** The note rows the list shows, by id, in shown order. */
+const shownNotes = () => within(entries()).getAllByText(/^Note \d+ about the Acme portal$/).map((element) => Number(element.textContent?.split(" ")[1]));
 const entries = () => screen.getByRole("region", { name: "Activity entries" });
 /** A row of the list: the button that opens the entry's record. */
 const entryRow = (name: RegExp | string) => within(entries()).getByRole("button", { name });
@@ -145,6 +149,114 @@ describe("ActivityTab", () => {
     expect(fresh.closest("li")?.className).toContain("is-new");
     for (const id of [5, 4, 3]) expect(screen.getByText(`Note ${id} about the Acme portal`)).toBeTruthy();
     expect(summaryText()).toMatch(/^4 of 10 entries loaded/);
+  });
+
+  it("lists a row recorded before the loaded rows once, in place, while Load older keeps paging from the oldest row", async () => {
+    // A late row's cursor (the backend's) pages from its own place; here it is a stand-in.
+    const late = row(9, "2026-10-20T10:00:00Z", { cursor: "cursor-late" });
+    vi.mocked(listActivityFeed)
+      .mockResolvedValueOnce(page([row(5, "2026-10-20T10:05:00Z"), row(4, "2026-10-20T10:04:00Z")], true))
+      .mockResolvedValueOnce(page([late]))
+      .mockResolvedValueOnce(page([row(3, "2026-10-20T10:03:00Z"), late, row(2, "2026-10-20T09:59:00Z")], true))
+      .mockResolvedValueOnce(page([row(1, "2026-10-20T09:58:00Z")], false));
+    const { rerender } = render(<Tab refreshVersion={0} />);
+    await screen.findByText(note(5));
+
+    rerender(<Tab refreshVersion={1} />);
+    await waitFor(() => expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ after: "cursor-5" })));
+    // Older history is unloaded: the older page lists the late row in its place.
+    await waitFor(() => expect(summaryText()).toMatch(/^2 of 9 entries loaded/));
+    expect(screen.queryByText(note(9))).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older entries" }));
+    await screen.findByText(note(2));
+    expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ before: "cursor-4" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load older entries" }));
+    await screen.findByText(note(1));
+    expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ before: "cursor-2" }));
+    expect(shownNotes()).toEqual([5, 4, 3, 9, 2, 1]);
+    expect(screen.queryByRole("button", { name: "Load older entries" })).toBeNull();
+  });
+
+  it("places a late row an older page read before it was recorded does not list", async () => {
+    const olderPage = deferred<ActivityFeedPage>();
+    vi.mocked(listActivityFeed)
+      .mockResolvedValueOnce(page([row(5, "2026-10-20T10:05:00Z"), row(4, "2026-10-20T10:04:00Z")], true))
+      .mockReturnValueOnce(olderPage.promise)
+      .mockResolvedValueOnce(page([row(9, "2026-10-20T10:03:30Z")]));
+    const { rerender } = render(<Tab refreshVersion={0} />);
+    await screen.findByText(note(5));
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older entries" }));
+    rerender(<Tab refreshVersion={1} />);
+    await waitFor(() => expect(listActivityFeed).toHaveBeenCalledTimes(3));
+    await act(async () => olderPage.resolve(page([row(3, "2026-10-20T10:03:00Z"), row(2, "2026-10-20T10:02:00Z")], true)));
+
+    await screen.findByText(note(9));
+    expect(shownNotes()).toEqual([5, 4, 9, 3, 2]);
+  });
+
+  it("lists a late row below every loaded row at the end once all history is loaded", async () => {
+    vi.mocked(listActivityFeed)
+      .mockResolvedValueOnce(page([row(5, "2026-10-20T10:05:00Z"), row(4, "2026-10-20T10:04:00Z")], false))
+      .mockResolvedValueOnce(page([row(6, "2026-10-20T10:06:00Z"), row(9, "2026-10-20T10:00:00Z"), row(6, "2026-10-20T10:06:00Z")]));
+    const { rerender } = render(<Tab refreshVersion={0} />);
+    await screen.findByText(note(5));
+
+    rerender(<Tab refreshVersion={1} />);
+
+    await screen.findByText(note(9));
+    expect(shownNotes()).toEqual([6, 5, 4, 9]);
+  });
+
+  it("continues each refresh from the last one's catch-up cursor, so late rows are not offered again", async () => {
+    vi.mocked(listActivityFeed)
+      .mockResolvedValueOnce(page([row(5, "2026-10-20T10:05:00Z"), row(4, "2026-10-20T10:04:00Z")]))
+      // Only a late row arrived: no row is newer than the head.
+      .mockResolvedValueOnce(page([row(9, "2026-10-20T10:04:30Z")], false, 9, "catch-up-1"))
+      // Only rows the view hides arrived.
+      .mockResolvedValueOnce(page([], false, 9, "catch-up-2"))
+      .mockResolvedValueOnce(page([row(10, "2026-10-20T10:06:00Z")], false, 10));
+    const { rerender } = render(<Tab refreshVersion={0} />);
+    await screen.findByText(note(5));
+
+    rerender(<Tab refreshVersion={1} />);
+    await screen.findByText(note(9));
+    const list = screen.getByRole("region", { name: "Activity entries" });
+    list.scrollTop = 400;
+    fireEvent.scroll(list);
+    rerender(<Tab refreshVersion={2} />);
+    await waitFor(() => expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ after: "catch-up-1" })));
+    rerender(<Tab refreshVersion={3} />);
+
+    await screen.findByRole("button", { name: "1 new entry — show" });
+    expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ after: "catch-up-2" }));
+    expect(shownNotes()).toEqual([5, 9, 4]);
+  });
+
+  it("drops an older page that lands after the list started again from its newest rows", async () => {
+    const olderPage = deferred<ActivityFeedPage>();
+    const behind = vi.mocked(listActivityFeed)
+      .mockResolvedValueOnce(page([row(5, "2026-10-20T10:05:00Z"), row(4, "2026-10-20T10:04:00Z")], true))
+      .mockReturnValueOnce(olderPage.promise);
+    // Too far behind to stitch: every catch-up page says more remain.
+    for (let id = 20; id < 25; id += 1) behind.mockResolvedValueOnce(page([row(id, `2026-10-20T11:${id}:00Z`)], true));
+    behind
+      .mockResolvedValueOnce(page([row(31, "2026-10-20T12:31:00Z"), row(30, "2026-10-20T12:30:00Z")], true, 40))
+      .mockResolvedValueOnce(page([row(29, "2026-10-20T12:29:00Z")], true, 40));
+    const { rerender } = render(<Tab refreshVersion={0} />);
+    await screen.findByText(note(5));
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older entries" }));
+    rerender(<Tab refreshVersion={1} />);
+    await screen.findByText(note(31));
+    await act(async () => olderPage.resolve(page([row(3, "2026-10-20T10:03:00Z"), row(2, "2026-10-20T10:02:00Z")], true)));
+
+    expect(shownNotes()).toEqual([31, 30]);
+    fireEvent.click(screen.getByRole("button", { name: "Load older entries" }));
+    await screen.findByText(note(29));
+    expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ before: "cursor-30" }));
+    expect(shownNotes()).toEqual([31, 30, 29]);
   });
 
   it("holds new rows behind a pill while the reader is scrolled down", async () => {

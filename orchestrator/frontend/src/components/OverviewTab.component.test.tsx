@@ -8,7 +8,7 @@ import { listActivityFeed, type ActivityFeedPage, type ActivityItem } from "../l
 
 vi.mock("../lib/api", () => ({ getReportReadiness: vi.fn() }));
 vi.mock("../lib/activityApi", () => ({ listActivityFeed: vi.fn() }));
-const emptyFeed: ActivityFeedPage = { items: [], has_more: false, total: 0, categories: [] };
+const emptyFeed: ActivityFeedPage = { items: [], has_more: false, catch_up_cursor: null, total: 0, categories: [] };
 const finding = { slug: "finding-one", title: "Example finding", severity: "high", workflow_status: "draft", verification_status: "unreviewed" } as AssessmentFinding;
 const props = { engagementKey: "one", assessmentSummary: null, findings: [finding], chains: [], chainLinks: [], currentPhase: "recon", assessmentRefreshVersion: 0, readinessRefreshVersion: 0 };
 beforeEach(() => {
@@ -165,7 +165,7 @@ it("shows egress mitigation guidance without offering controls that do nothing",
 });
 
 const activityItem: ActivityItem = {
-  id: "audit:7", source: "audit", source_id: 7, cursor: "c7",
+  id: "audit:7", source: "audit", source_id: 7, cursor: "c7", order: [2461334.9986111, 1, 7],
   occurred_at: "2026-10-20T11:58:00Z",
   actor: { name: "verifier", kind: "agent" },
   category: "findings", kind: "finding.verified",

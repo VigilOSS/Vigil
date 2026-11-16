@@ -1889,6 +1889,13 @@ def _create_core_tables(connection: sqlite3.Connection) -> None:
         # expression lets a page stop after its rows instead of sorting them all.
         "CREATE INDEX IF NOT EXISTS idx_events_engagement_julianday "
         "ON events(engagement_id, julianday(created_at) DESC, id DESC)",
+        # Every hook-logged tool call also stores an ``activity.recorded`` copy,
+        # which the Activity feed never lists or counts. Its pages and category
+        # counts read this index, so their cost follows the structured events
+        # rather than the length of the tool-call log.
+        "CREATE INDEX IF NOT EXISTS idx_events_engagement_feed_julianday "
+        "ON events(engagement_id, julianday(created_at) DESC, id DESC) "
+        "WHERE event_type != 'activity.recorded'",
     )
 
 
@@ -3907,6 +3914,13 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_code_analysis_queue_file_generation_status "
         "ON code_analysis_queue(engagement_id, file_id, repo_generation, status, id)"
+    )
+    # `analysis-queue/fetch` selects under the write lock; this lets it walk the
+    # pending rows in claim order and stop at its limit instead of reading and
+    # sorting every attempt the queue has held.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_analysis_queue_pending_claim "
+        "ON code_analysis_queue(engagement_id, priority DESC, id) WHERE status = 'pending'"
     )
 
     # Migrate code_analysis_results: add cwe_coverage and cross_file_triggers

@@ -33,8 +33,9 @@ import math
 import re
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Iterable, Literal
+from typing import Any, Callable, Iterable, Iterator, Literal
 
 from fastapi import HTTPException, status
 
@@ -212,8 +213,19 @@ def _mirror_exclusion_sql() -> tuple[str, list[Any]]:
 # ── Cursors ─────────────────────────────────────────────────────────────
 #
 # The feed's total order is (instant, source, id) descending, with audit rows
-# ranked above events at an identical instant. A cursor is that key; the
-# julianday float round-trips exactly through ``repr``.
+# ranked above events at an identical instant; every item carries that key as
+# ``order``. A cursor is that key; the julianday float round-trips exactly
+# through ``repr``.
+#
+# An audit row can be recorded after rows newer than its instant: a queued
+# logger dates a tool call by when it finished. A feed read's cursors therefore
+# also carry its audit watermark, the highest audit id the read could see, so a
+# catch-up (``after``) from one also returns the audit rows recorded since that
+# lie below its position. Such late rows are not the newest a catch-up gives,
+# so each response names where the next catch-up continues: its
+# ``catch_up_cursor``, also given when no row is listed so the watermark moves
+# past rows the view hides. A cursor may omit the watermark; a catch-up from it
+# then reads by position alone.
 
 _SOURCE_RANK = {"audit": 1, "event": 0}
 
@@ -223,26 +235,29 @@ class FeedCursor:
     julian: float
     source: Literal["audit", "event"]
     row_id: int
+    watermark: int | None = None
 
     def encode(self) -> str:
-        return f"{self.julian!r}~{self.source}~{self.row_id}"
+        position = f"{self.julian!r}~{self.source}~{self.row_id}"
+        return position if self.watermark is None else f"{position}~{self.watermark}"
 
     @classmethod
     def decode(cls, raw: str, *, field_name: str) -> FeedCursor:
         parts = raw.split("~")
         try:
-            if len(parts) != 3 or parts[1] not in _SOURCE_RANK:
+            if len(parts) not in (3, 4) or parts[1] not in _SOURCE_RANK:
                 raise ValueError(raw)
             julian = float(parts[0])
             row_id = int(parts[2])
-            if not math.isfinite(julian) or row_id < 1:
+            watermark = int(parts[3]) if len(parts) == 4 else None
+            if not math.isfinite(julian) or row_id < 1 or (watermark is not None and watermark < 0):
                 raise ValueError(raw)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"{field_name} is not a cursor returned by this feed",
             ) from exc
-        return cls(julian, parts[1], row_id)  # type: ignore[arg-type]
+        return cls(julian, parts[1], row_id, watermark)  # type: ignore[arg-type]
 
     def sort_key(self) -> tuple[float, int, int]:
         return (self.julian, _SOURCE_RANK[self.source], self.row_id)
@@ -357,6 +372,7 @@ def _fetch(
     older: bool,
     limit: int,
     dated: bool,
+    recorded: tuple[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """One source's next ``limit`` rows past ``cursor`` in feed order.
 
@@ -365,6 +381,10 @@ def _fetch(
     oldest rows of the feed (instant 0) in id order. They are read separately
     (``dated=False``) so the dated read (``dated=True``) keeps its
     julianday-index range seek.
+
+    ``recorded`` (low, high) instead reads the rows with ids in that half-open
+    range, ``low < id <= high``, lying past ``cursor`` in the ``older``
+    direction, in id order: the audit rows a catch-up gained after its cursor.
     """
     category_sql, category_params = source.category_sql()
     kind_sql, kind_params = source.actor_kind_sql()
@@ -380,11 +400,18 @@ def _fetch(
         params += cursor_params
     direction = "DESC" if older else "ASC"
     order = f"{julian_sql} {direction}, {source.id_sql} {direction}" if dated else f"{source.id_sql} {direction}"
+    table = source.table
+    if recorded is not None:
+        # The id range is the narrow bound: seek it by rowid, not the instant index.
+        table += " NOT INDEXED"
+        where.append(f"{source.id_sql} > ? AND {source.id_sql} <= ?")
+        params += list(recorded)
+        order = f"{source.id_sql} ASC"
     rows = connection.execute(
         f"""
         SELECT *, {julian_sql} AS feed_julian,
                ({category_sql}) AS feed_category, ({kind_sql}) AS feed_actor_kind
-        FROM {source.table}
+        FROM {table}
         WHERE {' AND '.join(where)}
         ORDER BY {order}
         LIMIT ?
@@ -400,10 +427,15 @@ def _category_counts(connection, engagement_id: int, filters: _Filters) -> dict[
     audit_where, audit_params = _audit_where(engagement_id, filters)
     event_category_sql, event_category_params = _event_category_sql()
     event_where, event_params = _event_where(engagement_id, filters)
+    # The audit category reads only actor kind and title, so rows are counted per
+    # actor and title in index order first and classified once per group; the
+    # tool-call log is thousands of rows over a handful of distinct titles.
     for sql, params in (
         (
-            f"SELECT ({audit_category_sql}) AS category, COUNT(*) AS n FROM activity_entries a "
-            f"WHERE {' AND '.join(audit_where)} GROUP BY category",
+            f"SELECT ({audit_category_sql}) AS category, SUM(a.n) AS n FROM ("
+            "SELECT a.actor_kind, a.actor_name, a.title, COUNT(*) AS n FROM activity_entries a "
+            f"WHERE {' AND '.join(audit_where)} GROUP BY a.actor_kind, a.actor_name, a.title"
+            ") a GROUP BY category",
             [*audit_category_params, *audit_params],
         ),
         (
@@ -1122,10 +1154,41 @@ _SOURCES = (
 # ── Public API ──────────────────────────────────────────────────────────
 
 
+def _item_cursor(item: dict[str, Any], watermark: int | None = None) -> FeedCursor:
+    julian, _, row_id = item["_sort"]
+    return FeedCursor(julian, item["source"], row_id, watermark)
+
+
+@contextmanager
+def _read_snapshot(connection) -> Iterator[None]:
+    """Hold one read transaction, so the watermark and every page, count and
+    attachment a feed read takes see the same committed rows. Inside a caller's
+    transaction the reads already share its snapshot."""
+    if connection.in_transaction:
+        yield
+        return
+    connection.execute("BEGIN")
+    try:
+        yield
+    finally:
+        connection.commit()
+
+
+def _watermark(connection) -> int:
+    """The highest audit id the read sees, one seek at the end of the table.
+
+    Audit ids are AUTOINCREMENT and SQLite has a single writer, so ids grow in
+    commit order: every audit row up to the watermark is visible to this read
+    and to later ones. It spans every engagement; the reads it bounds also
+    filter by engagement.
+    """
+    return int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM activity_entries").fetchone()[0])
+
+
 def _published(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The items as the API returns them, without the projection's working keys."""
     for item in items:
-        item.pop("_sort")
+        item["order"] = list(item.pop("_sort"))
         item.pop("_dispatch_candidates")
         for entity in item["entities"]:
             entity.pop("_lookup")
@@ -1184,27 +1247,63 @@ def list_activity_feed(
         else FeedCursor.decode(after, field_name="after") if after
         else None
     )
-    with get_connection() as connection:
+    with get_connection() as connection, _read_snapshot(connection):
+        watermark = _watermark(connection)
         filters = _search_matches(connection, engagement.id, filters)
+        late: list[dict[str, Any]] = []
+        if cursor is not None and not older and cursor.watermark is not None and watermark > cursor.watermark:
+            late = sorted(
+                (
+                    row
+                    for dated in (True, False)
+                    for row in _fetch(
+                        connection, _SOURCES[0], engagement.id, filters, selected, cursor,
+                        older=True, limit=limit + 1, dated=dated, recorded=(cursor.watermark, watermark),
+                    )
+                ),
+                key=lambda item: item["source_id"],
+            )[: limit + 1]
+        room = limit - len(late)
         rows = [
             row
             for source in _SOURCES
             for dated in (True, False)
             for row in _fetch(
                 connection, source, engagement.id, filters, selected, cursor,
-                older=older, limit=limit + 1, dated=dated,
+                older=older, limit=max(room, 0) + 1, dated=dated,
             )
-        ]
+        ] if room >= 0 else []
         rows.sort(key=lambda item: item["_sort"], reverse=older)
-        page, has_more = rows[:limit], len(rows) > limit
+        page, has_more = rows[: max(room, 0)], len(rows) > max(room, 0) or room < 0
         if not older:
             page.reverse()
+        for item in page:
+            item["cursor"] = _item_cursor(item, watermark).encode()
+        # A watermark past every gained row given: all of them, unless they overflow the page.
+        reached = watermark if room >= 0 else late[limit - 1]["source_id"]
+        newest = page[0] if page else None
+        if late:
+            # Gained rows lie below the catch-up's cursor, each listed at its own place.
+            late = late[:limit]
+            for item in late:
+                item["cursor"] = _item_cursor(item, reached).encode()
+            late.sort(key=lambda item: item["_sort"], reverse=True)
+            page += late
+        # The next catch-up continues from the newest row a first page or catch-up
+        # gives, else from the catch-up's own cursor; an older page names none.
+        catch_up = (
+            None if older and cursor is not None
+            else _item_cursor(newest, reached) if newest is not None
+            else replace(cursor, watermark=reached) if cursor is not None
+            else None
+        )
         _attach_dispatches(connection, engagement.id, page)
         _resolve_entity_refs(connection, engagement.id, page)
         counts = _category_counts(connection, engagement.id, filters)
     return {
         "items": _published(page),
         "has_more": has_more,
+        "catch_up_cursor": catch_up.encode() if catch_up is not None else None,
         "total": sum(counts[key] for key in selected),
         "categories": [
             {
@@ -1245,7 +1344,8 @@ def get_activity_entry(engagement_id: int, entry_id: str) -> dict[str, Any]:
         actor="", since=None, until=None, fts_term="", text_tokens=(),
         audit_ids=row_ids, event_ids=row_ids,
     )
-    with get_connection() as connection:
+    with get_connection() as connection, _read_snapshot(connection):
+        watermark = _watermark(connection)
         items = [
             item
             for dated in (True, False)
@@ -1254,6 +1354,8 @@ def get_activity_entry(engagement_id: int, entry_id: str) -> dict[str, Any]:
                 older=True, limit=1, dated=dated,
             )
         ]
+        for item in items:
+            item["cursor"] = _item_cursor(item, watermark).encode()
         if not items:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
