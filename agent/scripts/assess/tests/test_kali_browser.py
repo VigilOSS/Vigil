@@ -1198,6 +1198,45 @@ def test_a_small_driver_result_is_printed_whole(monkeypatch, tmp_path):
     assert "omitted" not in preview
 
 
+def test_a_large_evaluated_result_is_cut_and_the_cut_named(monkeypatch, tmp_path):
+    """An eval result is page-sized; the printed preview keeps the kali preview
+    cap and names each cut value and the stdout file that holds it whole."""
+    eval_result = {"html": "<div>Acme</div>" * 140_000}
+    step_result = ["https://app.example.com/item/" + str(n) for n in range(40_000)]
+    path = tmp_path / "run.out"
+    path.write_text(json.dumps({
+        "url": "https://app.example.com/", "title": "Acme", "http_status": 200,
+        "dom_path": "scans/browser/app.html", "eval_result": eval_result,
+        "steps": [
+            {"index": 0, "action": "eval", "status": "completed", "result": step_result},
+            {"index": 1, "action": "eval", "status": "completed", "result": 7},
+        ],
+    }) + "\n", encoding="utf-8")
+
+    def recorder(cmd, *, tool_name, **kwargs):
+        result = _mk_result()
+        result.stdout_path = str(path)
+        return result
+
+    monkeypatch.setattr(kb, "kali_exec", recorder)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        kb.run(_browser_args(har_out="scans/browser/app.har"))
+    preview = json.loads(out.getvalue())["stdout_preview"]
+
+    summary_line, omitted = preview.splitlines()
+    assert len(summary_line.encode("utf-8")) <= 32_768
+    summary = json.loads(summary_line)
+    assert summary["title"] == "Acme" and summary["steps"][1]["result"] == 7
+    compact = {"ensure_ascii": False, "separators": (",", ":")}
+    assert json.dumps(eval_result, **compact).startswith(summary["eval_result"])
+    assert json.dumps(step_result, **compact).startswith(summary["steps"][0]["result"])
+    assert "eval_result" in omitted and "steps[0].result" in omitted
+    assert "steps[1].result" not in omitted
+    assert str(path) in omitted
+    assert "scans/browser/app.har" in omitted and "scans/browser/app.html" in omitted
+
+
 def test_the_driver_counts_what_its_own_caps_drop():
     for key in ("network", "console", "route_candidates"):
         assert f'result["dropped"]["{key}"]' in kb._BROWSER_DRIVER

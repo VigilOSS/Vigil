@@ -1731,7 +1731,11 @@ def _read_proc_peak_rss(pid: int) -> Optional[int]:
     return None
 
 
-def _read_safely(path: Path, *, max_bytes: int = 32_768) -> str:
+# Every printed kali stdout preview keeps this cap; the run's stdout file keeps the whole output.
+PREVIEW_MAX_BYTES = 32_768
+
+
+def _read_safely(path: Path, *, max_bytes: int = PREVIEW_MAX_BYTES) -> str:
     """Return a preview of ``path`` capped at ``max_bytes``.
 
     For files smaller than ``max_bytes`` the full content is returned. For

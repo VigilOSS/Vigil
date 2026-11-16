@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.config import resolve_engagement_dir
+from assess.lib.kali_output import PREVIEW_MAX_BYTES
 from assess.lib.kali import (
     add_required_kali_flags,
     emit_result,
@@ -352,12 +353,82 @@ def _driver_output(result) -> dict[str, Any] | None:
     return None
 
 
+def _compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _json_head(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` whose JSON string form fits ``budget`` bytes."""
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _utf8_len(_compact(text[:mid])) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low]
+
+
+def _evaluated_values(summary: dict[str, Any]) -> list[tuple[str, dict[str, Any], str]]:
+    """Each page-evaluated value in ``summary``: its label, its holder, its key."""
+    values = []
+    if "eval_result" in summary:
+        values.append(("eval_result", summary, "eval_result"))
+    steps = summary.get("steps")
+    if isinstance(steps, list):
+        for position, step in enumerate(steps):
+            if isinstance(step, dict) and "result" in step:
+                index = step.get("index", position)
+                values.append((f"steps[{index}].result", step, "result"))
+    return values
+
+
+def _cut_evaluated_values(summary: dict[str, Any]) -> list[str]:
+    """Cut the page-evaluated values until the summary fits the preview cap.
+
+    ``--eval`` and step ``eval`` results are whatever the page returns, so they
+    are the values with no size of their own. The bytes the rest of the summary
+    leaves are shared between them: a value under its share stays whole, and
+    each larger one becomes the head of its JSON text. Returns what was cut.
+    """
+    if _utf8_len(_compact(summary)) <= PREVIEW_MAX_BYTES:
+        return []
+    values = _evaluated_values(summary)
+    if not values:
+        return []
+    texts = {label: _compact(holder[key]) for label, holder, key in values}
+    for _label, holder, key in values:
+        holder[key] = ""
+    remaining = PREVIEW_MAX_BYTES - _utf8_len(_compact(summary)) + 2 * len(values)
+    cut: list[str] = []
+    ordered = sorted(values, key=lambda entry: _utf8_len(texts[entry[0]]))
+    for position, (label, holder, key) in enumerate(ordered):
+        text = texts[label]
+        share = max(remaining, 0) // (len(ordered) - position)
+        if _utf8_len(text) <= share:
+            holder[key] = json.loads(text)
+            remaining -= _utf8_len(text)
+            continue
+        head = _json_head(text, share)
+        holder[key] = head
+        remaining -= _utf8_len(_compact(head))
+        cut.append(
+            f"{label} cut to the first {_utf8_len(head)} of its {_utf8_len(text)} "
+            "JSON bytes"
+        )
+    return cut
+
+
 def _bounded_preview(result, *, har_out: str, dom_out: str) -> str:
     """The driver result with each list capped, plus a line naming what was left out."""
     output = _driver_output(result)
     if output is None:
         return str(result.stdout_preview or "")
-    summary = dict(output)
+    summary = json.loads(_compact(output))
     shown: list[str] = []
     for key, limit in _PREVIEW_LIST_LIMITS.items():
         items = summary.get(key)
@@ -369,10 +440,22 @@ def _bounded_preview(result, *, har_out: str, dom_out: str) -> str:
         for key, count in (output.get("dropped") or {}).items()
         if isinstance(count, int) and count > 0
     }
-    preview = json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
-    if not shown and not dropped:
+    cut = _cut_evaluated_values(summary)
+    preview = _compact(summary)
+    preview_bytes = _utf8_len(preview)
+    if preview_bytes > PREVIEW_MAX_BYTES:
+        # What is left over the cap is fields the driver sized itself (console
+        # text, URLs, errors), so the line is cut as text rather than as JSON.
+        preview = preview.encode("utf-8")[:PREVIEW_MAX_BYTES].decode("utf-8", errors="ignore")
+        cut.append(
+            f"the summary line itself cut to its first {_utf8_len(preview)} of "
+            f"{preview_bytes} bytes, so it is not valid JSON"
+        )
+    if not shown and not dropped and not cut:
         return preview
     parts = []
+    if cut:
+        parts.append("this preview has " + ", ".join(cut))
     if shown:
         parts.append("this preview keeps " + ", ".join(shown))
     if dropped:
@@ -381,7 +464,7 @@ def _bounded_preview(result, *, har_out: str, dom_out: str) -> str:
             + ", ".join(f"{count} more {key}" for key, count in sorted(dropped.items()))
             + " it did not keep"
         )
-    where = [f"full driver output: {result.stdout_path}"]
+    where = [f"full driver output, every evaluated result whole: {result.stdout_path}"]
     if har_out:
         where.append(f"every request: HAR {har_out}")
     where.append(f"rendered DOM: {output.get('dom_path') or dom_out}")
