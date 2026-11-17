@@ -10,6 +10,7 @@ from pathlib import Path
 import plistlib
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -22,17 +23,13 @@ ZCODE_MINIMUM = (3, 14, 3)
 CAPABILITY_PROBE_TIMEOUT_SECONDS = 10
 
 
-def _opencode_capabilities() -> int:
-    """The installed OpenCode major, after checking its release and native --prompt option."""
+def _opencode_capabilities() -> None:
+    """Check the installed OpenCode release and its native --prompt option."""
+    if shutil.which("opencode") is None:
+        raise SystemExit(f"OpenCode CLI is required; install stable {opencode_launch.SUPPORTED_RANGE}")
+    # An unreadable version proceeds; the --help probe below checks the capability.
+    opencode_launch.probe_supported_version("opencode")
     try:
-        version = subprocess.run(
-            ["opencode", "--version"], capture_output=True, text=True, check=True,
-            timeout=CAPABILITY_PROBE_TIMEOUT_SECONDS,
-        )
-        version_text = "\n".join(part for part in (version.stdout, version.stderr) if part)
-        release = opencode_launch.parse_release(version_text)
-        if release is None or not opencode_launch.is_supported(release):
-            raise SystemExit(f"Remediation requires stable {opencode_launch.SUPPORTED_RANGE}")
         help_result = subprocess.run(
             ["opencode", "--help"], capture_output=True, text=True, check=True,
             timeout=CAPABILITY_PROBE_TIMEOUT_SECONDS,
@@ -44,7 +41,6 @@ def _opencode_capabilities() -> int:
         raise SystemExit("OpenCode capability probe timed out; verify the CLI before retrying") from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit(f"OpenCode CLI is required; install stable {opencode_launch.SUPPORTED_RANGE}") from exc
-    return release[0]
 
 
 def _zcode_application() -> tuple[Path, str]:
@@ -215,7 +211,7 @@ def start_repository_client(args: argparse.Namespace, install_root: Path, engage
     environment["VIGIL_CLIENT_NAME"] = client
     checks = project.get("remediation", {}).get("check_commands", [])
     if client == "opencode":
-        major = _opencode_capabilities()
+        _opencode_capabilities()
         environment["OPENCODE_CONFIG_CONTENT"] = _opencode_configuration(source)
         # OpenCode reads autoupdate only from its global config. An update prompt
         # over the TUI takes the next keystroke as consent to upgrade the client,
@@ -223,8 +219,8 @@ def start_repository_client(args: argparse.Namespace, install_root: Path, engage
         # compatibility stays as configured: its switches also skip the
         # repository's own CLAUDE.md and .claude/skills.
         environment["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
-        # The session config carries /vigil-remediate, so OpenCode 2 runs its own server.
-        argv = ["opencode", *opencode_launch.server_arguments(major), "--prompt", opening]
+        # The session config carries /vigil-remediate, so the TUI runs its own server.
+        argv = ["opencode", opencode_launch.STANDALONE, "--prompt", opening]
     elif client == "zcode":
         application, version = _zcode_application()
         try:

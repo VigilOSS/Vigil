@@ -9,15 +9,16 @@ assessment start does and saves it as OpenCode's choice for that model.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from vigil_cli import engagements
+from vigil_cli import engagements, opencode_launch
 
 
-def _installed_opencode(monkeypatch: pytest.MonkeyPatch, version_output: str) -> None:
+def _installed_opencode(monkeypatch: pytest.MonkeyPatch, version_output: str, returncode: int = 0) -> None:
     """Answer the launch's ``opencode --version`` probe without a host install."""
     original_which = engagements.shutil.which
     monkeypatch.setattr(engagements.shutil, "which",
@@ -26,7 +27,7 @@ def _installed_opencode(monkeypatch: pytest.MonkeyPatch, version_output: str) ->
 
     def run(argv, *args, **kwargs):
         if list(argv) == ["/native/opencode", "--version"]:
-            return subprocess.CompletedProcess(argv, 0, version_output, "")
+            return subprocess.CompletedProcess(argv, returncode, version_output, "")
         return original_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", run)
@@ -47,7 +48,7 @@ def blue_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(application))
     monkeypatch.setattr(engagements, "set_active_engagement", lambda *args: None)
     monkeypatch.setattr(engagements.os, "chdir", lambda *args: None)
-    _installed_opencode(monkeypatch, "1.18.10\n")
+    _installed_opencode(monkeypatch, "opencode v2.3.0\n")
     return path
 
 
@@ -58,26 +59,6 @@ def _saved_choices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     saved.write_text(json.dumps({"variant": {"acme/model-1": "high", "acme/model-2": "low"}}))
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     return saved
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [["--model=acme/model-1#max"], ["--model", "acme/model-1#max"], ["-m", "acme/model-1#max"]],
-)
-def test_blue_opencode_start_saves_the_variant_and_forwards_the_bare_model(
-    tmp_path, monkeypatch, capsys, blue_engagement, arguments
-) -> None:
-    saved = _saved_choices(tmp_path, monkeypatch)
-    launched: list[list[str]] = []
-    monkeypatch.setattr(engagements.os, "execv", lambda path, argv: launched.append(argv))
-
-    engagements.start_engagement(tmp_path, blue_engagement, "opencode", arguments)
-
-    argv = launched[0]
-    assert not any("#" in argument for argument in argv)
-    assert "acme/model-1" in argv or "--model=acme/model-1" in argv
-    assert json.loads(saved.read_text())["variant"] == {"acme/model-1": "max", "acme/model-2": "low"}
-    assert "variant: max for acme/model-1" in capsys.readouterr().err
 
 
 def test_blue_opencode_start_refuses_an_unreadable_choice_file_before_launch(
@@ -95,17 +76,50 @@ def test_blue_opencode_start_refuses_an_unreadable_choice_file_before_launch(
     assert saved.read_text() == "[]"
 
 
+@pytest.mark.parametrize("version_output", ["1.18.10\n", "opencode v2.2.0\n", "opencode v3.0.0\n"])
+def test_opencode_start_refuses_a_release_outside_the_supported_range(
+    tmp_path, monkeypatch, blue_engagement, version_output
+) -> None:
+    saved = _saved_choices(tmp_path, monkeypatch)
+    _installed_opencode(monkeypatch, version_output)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(engagements.os, "execv", lambda path, argv: launched.append(argv))
+
+    with pytest.raises(SystemExit, match=re.escape(opencode_launch.SUPPORTED_RANGE)):
+        engagements.start_engagement(tmp_path, blue_engagement, "opencode", ["--model=acme/model-1#max"])
+
+    assert launched == []
+    assert json.loads(saved.read_text())["variant"] == {"acme/model-1": "high", "acme/model-2": "low"}
+
+
+@pytest.mark.parametrize(("version_output", "returncode"),
+                         [("", 1), ("opencode 2.3.0 (update 2.4.0 available)\n", 0)])
+def test_opencode_start_with_an_unreadable_version_uses_the_supported_flags(
+    tmp_path, monkeypatch, blue_engagement, version_output, returncode
+) -> None:
+    _installed_opencode(monkeypatch, version_output, returncode)
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", "{}")
+    launched: list[list[str]] = []
+    monkeypatch.setattr(engagements.os, "execv", lambda path, argv: launched.append(argv))
+
+    engagements.start_engagement(tmp_path, blue_engagement, "opencode", ["--model=acme/model-1"])
+
+    assert not any(argument.startswith(("--model", "-m")) for argument in launched[0])
+    assert json.loads(engagements.os.environ["OPENCODE_CONFIG_CONTENT"])["model"] == "acme/model-1"
+
+
 @pytest.mark.parametrize("version_output", ["opencode v2.3.0\n", "2.3.0\n"])
 @pytest.mark.parametrize(
     "arguments",
     [["--model=acme/model-1#max", "--dangerously-skip-permissions"],
-     ["--model", "acme/model-1#max", "--dangerously-skip-permissions"]],
+     ["--model", "acme/model-1#max", "--dangerously-skip-permissions"],
+     ["-m", "acme/model-1#max", "--dangerously-skip-permissions"]],
 )
-def test_opencode_2_start_moves_the_model_into_the_session_config(
-    tmp_path, monkeypatch, blue_engagement, arguments, version_output
+def test_opencode_start_moves_the_model_into_the_session_config(
+    tmp_path, monkeypatch, capsys, blue_engagement, arguments, version_output
 ) -> None:
-    """OpenCode 2 has no --model: the operator's model rides the session config,
-    where it outranks the operator wrapper's pinned model as --model does on 1.x."""
+    """The TUI has no --model: the operator's model rides the session config,
+    where it outranks the operator wrapper's pinned model."""
     saved = _saved_choices(tmp_path, monkeypatch)
     _installed_opencode(monkeypatch, version_output)
     monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"share": "disabled"}))
@@ -122,3 +136,4 @@ def test_opencode_2_start_moves_the_model_into_the_session_config(
                        "agent": {"operator": {"model": "acme/model-1#max"}}}
     # A saved per-model choice outranks a configured variant, so it is saved too.
     assert json.loads(saved.read_text())["variant"] == {"acme/model-1": "max", "acme/model-2": "low"}
+    assert "variant: max for acme/model-1" in capsys.readouterr().err

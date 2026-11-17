@@ -13,7 +13,6 @@ from contextlib import ExitStack
 import re
 import shutil
 import stat
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -21,7 +20,6 @@ from . import opencode_launch
 from .install_fs import open_pinned_directory
 from .status import Check
 
-PROBE_TIMEOUT_SECONDS = 10
 ZCODE_MINIMUM = (3, 14, 3)
 MAX_CONTEXTS = 128
 MAX_RECEIPTS = 256
@@ -375,21 +373,17 @@ def _opencode_checks() -> list[Check]:
     executable = shutil.which("opencode")
     if executable is None:
         return [Check("opencode", "MISSING", f"Install stable {opencode_launch.SUPPORTED_RANGE}.", True)]
-    try:
-        result = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                check=False, timeout=PROBE_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
-        return [Check("opencode", "UNVERIFIED", "The bounded --version probe failed; verify the CLI.", True)]
-    if result.returncode != 0:
-        return [Check("opencode", "FAIL", "The native --version probe exited unsuccessfully.", True)]
-    version = result.stdout or result.stderr
-    release = opencode_launch.parse_release(version)
-    if release is None:
-        return [Check("opencode", "UNVERIFIED", "Unrecognized native release version; verify a stable release "
-                      f"({opencode_launch.SUPPORTED_RANGE}).", True)]
-    if not opencode_launch.is_supported(release):
-        return [Check("opencode", "FAIL", f"{version.strip()}; install stable {opencode_launch.SUPPORTED_RANGE}.", True)]
-    return [Check("opencode", "OK", version.strip(), True)]
+    version = opencode_launch.probe_version(executable)
+    if version is None:
+        return [Check("opencode", "UNVERIFIED", "The bounded --version probe failed or exited unsuccessfully; "
+                      "verify the CLI.", True)]
+    support = opencode_launch.version_support(version)
+    if support == opencode_launch.UNSUPPORTED:
+        return [Check("opencode", "FAIL", f"{version}; install stable {opencode_launch.SUPPORTED_RANGE}.", True)]
+    if support == opencode_launch.UNVERIFIED:
+        return [Check("opencode", "UNVERIFIED", f"{version}: not a recognized stable release; verify a stable "
+                      f"release ({opencode_launch.SUPPORTED_RANGE}).", True)]
+    return [Check("opencode", "OK", version, True)]
 
 
 def _zcode_checks() -> list[Check]:

@@ -32,7 +32,7 @@ def launch_environment(tmp_path):
         f"#!{sys.executable}\n"
         "import json, os, pathlib, sys\n"
         "if sys.argv[1:] == ['--version']:\n"
-        "    print('1.18.10')\n"
+        "    print('opencode v2.3.0')\n"
         "    raise SystemExit(0)\n"
         "context = os.environ.get('VIGIL_CLIENT_CONTEXT')\n"
         "row = {'argv': sys.argv[1:], 'cwd': os.getcwd(), 'context_path': context}\n"
@@ -244,7 +244,7 @@ def test_real_cli_opencode_selection_executes_bound_native_workspace(launch_envi
     context = Path(native["context_path"])
     assert binding["engagement_dir"] == str(selected)
     assert binding["mode"] == mode
-    assert binding["native_version"] == "1.18.10"
+    assert binding["native_version"] == "opencode v2.3.0"
     assert binding["backend_url"] == "http://127.0.0.1:9"
     project = selected / "clients/opencode" / mode
     assert Path(native["cwd"]) == project
@@ -255,7 +255,8 @@ def test_real_cli_opencode_selection_executes_bound_native_workspace(launch_envi
     selection_row = json.loads((project / ".vigil-current-context.json").read_text())
     assert selection_row["binding_path"] == str(context)
     assert context.parent.parent.parent == selected / "client-context"
-    assert native["argv"][:2] == ["--agent", "operator"]
+    assert native["argv"][0] == "--standalone"
+    assert "--agent" not in native["argv"]
     assert "--prompt" in native["argv"]
     assert os.access(binding["vigil_cli"], os.X_OK)
     assert (context.parent / "AGENTS.md").is_file()

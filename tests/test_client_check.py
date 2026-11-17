@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from vigil_cli import application as application_module
-from vigil_cli import client_checks
+from vigil_cli import client_checks, opencode_launch
 from vigil_cli import main as cli
 
 
@@ -40,9 +40,9 @@ def test_client_check_is_available_without_an_active_engagement(tmp_path, monkey
 
 
 @pytest.mark.parametrize(("version", "status"), [
-    ("1.18.10\n", "OK"), ("1.19.3\n", "OK"), ("1.18.9\n", "FAIL"),
-    ("opencode v2.3.0\n", "OK"), ("2.0.0\n", "OK"), ("v2.3.0\n", "OK"),
-    ("opencode v3.0.0\n", "FAIL"), ("1.19.3-beta\n", "UNVERIFIED"), ("opencode v2.3\n", "UNVERIFIED"),
+    ("opencode v2.3.0\n", "OK"), ("2.3.0\n", "OK"), ("v2.3.0\n", "OK"), ("opencode v2.9.1\n", "OK"),
+    ("1.18.10\n", "FAIL"), ("opencode v2.2.0\n", "FAIL"), ("opencode v3.0.0\n", "FAIL"),
+    ("opencode v3.0.0-rc.1\n", "FAIL"), ("opencode v2.4.0-beta\n", "UNVERIFIED"), ("opencode v2.3\n", "UNVERIFIED"),
 ])
 def test_opencode_version_is_bounded_and_never_contacts_a_provider(monkeypatch, version, status):
     calls = []
@@ -50,11 +50,11 @@ def test_opencode_version_is_bounded_and_never_contacts_a_provider(monkeypatch, 
     def probe(argv, **kwargs):
         calls.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 0, version, "")
-    monkeypatch.setattr(client_checks.subprocess, "run", probe)
+    monkeypatch.setattr(subprocess, "run", probe)
     assert client_checks.collect_client_checks("opencode")[0].status == status
     assert len(calls) == 1
     assert calls[0][0] == ["/usr/local/bin/opencode", "--version"]
-    assert calls[0][1]["timeout"] == client_checks.PROBE_TIMEOUT_SECONDS
+    assert calls[0][1]["timeout"] == opencode_launch.PROBE_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize("failure", [OSError("not executable"), subprocess.TimeoutExpired("opencode", 10)])
@@ -62,7 +62,7 @@ def test_opencode_probe_failure_is_reported_not_raised(monkeypatch, failure):
     monkeypatch.setattr(client_checks.shutil, "which", lambda name: "/usr/local/bin/opencode")
     def probe(*args, **kwargs):
         raise failure
-    monkeypatch.setattr(client_checks.subprocess, "run", probe)
+    monkeypatch.setattr(subprocess, "run", probe)
     assert client_checks.collect_client_checks("opencode")[0].status == "UNVERIFIED"
 
 
@@ -76,7 +76,7 @@ def test_zcode_metadata_check_does_not_activate_application(tmp_path, monkeypatc
     # Hide a real system app so the test selects its synthetic user application.
     original_is_file = Path.is_file
     monkeypatch.setattr(Path, "is_file", lambda path: False if path == Path("/Applications/ZCode.app/Contents/Info.plist") else original_is_file(path))
-    monkeypatch.setattr(client_checks.subprocess, "run", lambda *a, **k: pytest.fail("must not activate native app"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("must not activate native app"))
     check = client_checks.collect_client_checks("zcode")[0]
     assert (check.status, check.detail) == ("OK", "3.15.3")
 

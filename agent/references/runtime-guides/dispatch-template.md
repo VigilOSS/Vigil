@@ -22,8 +22,8 @@ immutable local packet are published. `--dry-run` validates without registering,
 authorizing a launch. The command spawns nothing. Choose the registered role in the client,
 launch a fresh child with the envelope, then record the child's real handle with
 `agent bind-client-handle` unless the `Vigil dispatch binding:` line reports `bound` or
-`already_bound` (OpenCode 1: in the `task` result; OpenCode 2: a separate Vigil note in the operator
-session). The backend dispatch ID and the native client handle are separate namespaces.
+`already_bound` (OpenCode: a separate Vigil note in the operator session). The backend dispatch
+ID and the native client handle are separate namespaces.
 
 An exact registration retry returns the same dispatch and packet with `launch_required=false`.
 That is for recovery and inspection, not a licence to launch a duplicate worker. Changed inputs

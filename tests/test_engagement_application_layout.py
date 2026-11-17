@@ -226,14 +226,14 @@ def test_opencode_upgrade_prepares_new_context_without_rebinding_active_session_
     monkeypatch.setattr(assessment_clients.shutil, "which", lambda *_: "/usr/bin/client")
     native_run = assessment_clients.subprocess.run
     monkeypatch.setattr(assessment_clients.subprocess, "run",
-        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "1.19.3\n", "")
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "opencode v2.3.0\n", "")
         if argv[0] == "/usr/bin/client" else native_run(argv, **kwargs))
     class PreparationReached(Exception):
         pass
 
     def prepare_context(install, directory, client, mode, **kwargs):
         assert (install, directory, client, mode) == (workspace, engagement, "opencode", "code")
-        assert kwargs["native_version"] == "1.19.3"
+        assert kwargs["native_version"] == "opencode v2.3.0"
         raise PreparationReached("New immutable native context preparation reached")
 
     monkeypatch.setattr(assessment_clients, "prepare_workspace", prepare_context)

@@ -20,6 +20,7 @@ behind.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ import pytest
 from vigil_cli import blue as blue_module
 from vigil_cli import engagements as engagements_module
 from vigil_cli import main as main_module
+from vigil_cli import opencode_launch
 from vigil_cli import orchestrator as orchestrator_module
 from vigil_cli import preflight as preflight_module
 from vigil_cli import status as status_module
@@ -256,6 +258,48 @@ def test_blue_opencode_start_refuses_without_the_deepseek_key(
         _blue_engage(install_root, "--start", "opencode")  # type: ignore[arg-type]
 
     assert blue_env["started"] is None
+
+
+def _unsupported_opencode(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Answer the preflight's ``--version`` probe with a release outside the range,
+    and record every side effect a refused start must not reach."""
+    effects: list[str] = []
+    real_run = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if list(argv) == ["/usr/bin/client", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, "1.18.10\n", "")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(preflight_module, "_ensure_engagement_backend", lambda *a: effects.append("backend"))
+    monkeypatch.setattr(blue_module, "write_opencode_reasoning_config", lambda *a, **k: effects.append("config"))
+    return effects
+
+
+def test_blue_opencode_start_refuses_an_unsupported_release_before_any_side_effect(
+    blue_env: dict[str, object], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    effects = _unsupported_opencode(monkeypatch)
+
+    with pytest.raises(SystemExit, match=re.escape(opencode_launch.SUPPORTED_RANGE)):
+        _blue_engage(blue_env["install_root"], "--start", "opencode")  # type: ignore[arg-type]
+
+    assert capsys.readouterr().out == ""
+    assert effects == []
+    assert blue_env["started"] is None
+
+
+def test_red_opencode_start_refuses_an_unsupported_release_before_any_side_effect(
+    red_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    effects = _unsupported_opencode(monkeypatch)
+
+    with pytest.raises(SystemExit, match=re.escape(opencode_launch.SUPPORTED_RANGE)):
+        _red_start(red_env["install_root"], "opencode")  # type: ignore[arg-type]
+
+    assert effects == []
+    assert red_env["started"] is None
 
 
 def test_red_opencode_start_uses_the_clients_native_authentication(

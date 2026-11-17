@@ -23,6 +23,7 @@ from vigil_cli import client_rosters
 from vigil_cli import engagements
 from vigil_cli import install as install_module
 from vigil_cli import main as main_module
+from vigil_cli import opencode_launch
 from vigil_cli.paths import resolve_orchestrator_base_url
 
 
@@ -422,9 +423,8 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
             "opencode",
             [
                 "opencode",
-                "--agent",
-                "operator",
-                "--dangerously-skip-permissions",
+                "--standalone",
+                "--auto",
                 "--model",
                 "test-model",
                 "--prompt",
@@ -653,7 +653,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
     permission_args = {
         "codex": ["--dangerously-bypass-approvals-and-sandbox"] if skip_permissions else [],
         "claude": ["--dangerously-skip-permissions"] if skip_permissions else [],
-        "opencode": ["--dangerously-skip-permissions"] if skip_permissions else [],
+        "opencode": ["--auto"] if skip_permissions else [],
         "goose": [],
         "kimi": ["--auto"] if skip_permissions else [],
         "pi": [],
@@ -673,7 +673,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
     command_prefixes = {
         "codex": ["codex"],
         "claude": ["claude"],
-        "opencode": ["opencode", "--agent", "operator"],
+        "opencode": ["opencode", "--standalone"],
         "goose": ["goose", "run", "--interactive", "--with-builtin", "developer"],
         "kimi": ["kimi"],
         "pi": ["pi"],
@@ -936,9 +936,7 @@ def test_entrypoint_repair_explicit_skip_override_upgrades_config_only_legacy_en
     assert "--dangerously-skip-permissions" in (
         engagement_dir / "start_claude.sh"
     ).read_text()
-    assert "--dangerously-skip-permissions" in (
-        engagement_dir / "start_opencode.sh"
-    ).read_text()
+    assert "--auto" in (engagement_dir / "start_opencode.sh").read_text()
     assert "--auto" in (engagement_dir / "start_kimi.sh").read_text()
 
 
@@ -1276,12 +1274,17 @@ def test_start_engagement_dispatches_to_exact_client_launcher(
 
         monkeypatch.setattr(assessment_clients, "start_client",
             lambda *args, **kwargs: calls.setdefault("native", (args, kwargs)))
+        # The start reads the installed version once and hands it to the adapter.
+        original_which = engagements.shutil.which
+        monkeypatch.setattr(engagements.shutil, "which",
+            lambda name: "/native/opencode" if name == "opencode" else original_which(name))
+        monkeypatch.setattr(opencode_launch, "probe_version", lambda _executable: "opencode v2.3.0")
 
     engagements.start_engagement(install_root, engagement_dir, client, ["--model", "test"])
 
     if client == "opencode":
         assert calls == {"native": ((install_root, engagement_dir, "opencode", "web", ["--model", "test"]),
-                                    {"no_autoprompt": False})}
+                                    {"no_autoprompt": False, "opencode_version": "opencode v2.3.0"})}
         return
     assert calls == {
         "cwd": engagement_dir,
@@ -1432,29 +1435,22 @@ def test_goose_launcher_routes_between_run_and_session(
     ("client_args", "expected_tail"),
     [
         # The TUI is the session; `opencode run` is the one-shot form and must not
-        # be what an engagement start execs.
-        ([], ["opencode", "--agent", "operator", "--dangerously-skip-permissions"]),
+        # be what an engagement start execs. The engagement config's default_agent
+        # selects the operator, and the TUI runs its own server so that server
+        # inherits the launcher's environment.
+        ([], ["opencode", "--standalone", "--auto"]),
         (
             ["--model", "test-model"],
-            [
-                "opencode",
-                "--agent",
-                "operator",
-                "--dangerously-skip-permissions",
-                "--model",
-                "test-model",
-            ],
+            ["opencode", "--standalone", "--auto", "--model", "test-model"],
         ),
         (
             ["operator task"],
-            [
-                "opencode",
-                "--agent",
-                "operator",
-                "--dangerously-skip-permissions",
-                "--prompt",
-                "operator task",
-            ],
+            ["opencode", "--standalone", "--auto", "--prompt", "operator task"],
+        ),
+        # OpenCode rejects a repeated --auto; a forwarded one replaces the launcher's.
+        (
+            ["--auto", "--prompt", "operator task"],
+            ["opencode", "--standalone", "--auto", "--prompt", "operator task"],
         ),
     ],
 )
@@ -1488,30 +1484,25 @@ def test_opencode_launcher_opens_a_session(
     assert result.returncode == 0, result.stderr
     payload = json.loads(capture.read_text())
     assert [Path(payload["argv"][0]).name, *payload["argv"][1:]] == expected_tail
+    assert json.loads(payload["files"]["opencode.json"])["default_agent"] == "operator"
 
 
-@pytest.mark.parametrize(
-    ("version_output", "expected_prefix"),
-    [
-        ("1.18.10", ["opencode", "--agent", "operator", "--dangerously-skip-permissions"]),
-        # OpenCode 2 has no --agent: the engagement config's default_agent selects
-        # the operator, and the TUI runs its own server so that server inherits the
-        # launcher's environment.
-        ("opencode v2.3.0", ["opencode", "--standalone", "--auto"]),
-        ("2.3.0", ["opencode", "--standalone", "--auto"]),
-    ],
-)
-def test_opencode_launcher_selects_the_flags_of_the_installed_major(
-    tmp_path: Path, version_output: str, expected_prefix: list[str]
-) -> None:
+def test_entrypoint_repair_rewrites_an_existing_opencode_launcher(tmp_path: Path) -> None:
+    """An engagement created by an earlier release keeps its start_opencode.sh
+    until repair or upgrade regenerates it in the current form."""
     install_root, engagement_dir, bin_dir = _build_entrypoint_fixture(tmp_path)
-    (bin_dir / "opencode-capture").write_text(_CAPTURE_STUB)
-    (bin_dir / "opencode-capture").chmod(0o755)
-    (bin_dir / "opencode").write_text(
-        "#!/bin/sh\n"
-        f'if [ "$1" = --version ]; then printf "%s\\n" {shlex.quote(version_output)}; exit 0; fi\n'
-        f'exec {shlex.quote(str(bin_dir / "opencode-capture"))} "$@"\n'
+    launcher = engagement_dir / "start_opencode.sh"
+    current = launcher.read_text()
+    exec_block = opencode_launch.launcher_exec_block(True) + "\n"
+    assert current.endswith(exec_block)
+    launcher.write_text(
+        current[: -len(exec_block)]
+        + 'exec opencode --agent operator --dangerously-skip-permissions "$@"\n'
     )
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == (engagement_dir.name,)
     capture = tmp_path / "opencode.json"
     env = os.environ.copy()
     env.update(
@@ -1521,33 +1512,14 @@ def test_opencode_launcher_selects_the_flags_of_the_installed_major(
             "VIGIL_PATH_EXPANSION": "must-not-expand",
         }
     )
-
-    result = subprocess.run(
-        [str(engagement_dir / "start_opencode.sh"), "--prompt", "operator task"],
-        cwd=engagement_dir,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(capture.read_text())
-    assert payload["argv"][1:] == [*expected_prefix[1:], "--prompt", "operator task"]
-    assert json.loads(payload["files"]["opencode.json"])["default_agent"] == "operator"
-
-    # OpenCode 2 rejects a repeated --auto; a forwarded one replaces the launcher's.
-    result = subprocess.run(
-        [str(engagement_dir / "start_opencode.sh"), "--auto"],
+    launched = subprocess.run(
+        [str(launcher), *engagements.client_launch_argv("opencode", ["operator task"])],
         cwd=engagement_dir, env=env, check=False, capture_output=True, text=True, timeout=15,
     )
-    assert result.returncode == 0, result.stderr
-    argv = json.loads(capture.read_text())["argv"][1:]
-    if "--standalone" in expected_prefix:
-        assert argv == ["--standalone", "--auto"]
-    else:
-        assert argv == [*expected_prefix[1:], "--auto"]
+    assert launched.returncode == 0, launched.stderr
+    assert json.loads(capture.read_text())["argv"][1:] == [
+        "--standalone", "--auto", "--prompt", "operator task",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1780,6 +1752,17 @@ def test_claude_settings_materialize_absolute_paths_for_compaction_and_session_h
     assert "matcher" not in settings["hooks"]["SessionEnd"][0]
 
 
+# Load the standard plugin as OpenCode does (its default export's setup) and
+# report one finished shell call to the hook it registers.
+_OPENCODE_STANDARD_SHELL_CALL = (
+    "const mod = await import(process.argv[1]); "
+    "const hooks = {}; "
+    "await mod.default.setup({tool: {hook: async (name, fn) => { hooks[name] = fn }}}); "
+    "await hooks['execute.after']({tool: 'shell', input: {command: 'whoami'}, "
+    "sessionID: 'ses_acme', messageID: 'msg_acme', id: 'call_acme'});"
+)
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to execute the OpenCode plugin")
 def test_opencode_standard_hook_resolves_from_bare_engagement_cwd(
     tmp_path: Path,
@@ -1802,11 +1785,7 @@ def test_opencode_standard_hook_resolves_from_bare_engagement_cwd(
     hook.chmod(0o755)
     plugin = tmp_path / "standard-hooks.mjs"
     shutil.copy2(repo_root / "agent" / ".opencode" / "plugin" / "standard-hooks.js", plugin)
-    runner = (
-        "const mod = await import(process.argv[1]); "
-        "const hooks = await mod.VigilStandardHooks(); "
-        "await hooks['tool.execute.after']({tool:'bash',args:{command:'whoami'}}, {});"
-    )
+    runner = _OPENCODE_STANDARD_SHELL_CALL
     env = os.environ.copy()
     env.pop("VIGIL_AGENT_ROOT", None)
 
@@ -1830,11 +1809,7 @@ def test_opencode_standard_hook_reports_unresolvable_bare_session(
     repo_root = Path(__file__).resolve().parents[1]
     plugin = tmp_path / "standard-hooks.mjs"
     shutil.copy2(repo_root / "agent" / ".opencode" / "plugin" / "standard-hooks.js", plugin)
-    runner = (
-        "const mod = await import(process.argv[1]); "
-        "const hooks = await mod.VigilStandardHooks(); "
-        "await hooks['tool.execute.after']({tool:'bash',args:{command:'whoami'}}, {});"
-    )
+    runner = _OPENCODE_STANDARD_SHELL_CALL
     env = os.environ.copy()
     env.pop("VIGIL_AGENT_ROOT", None)
 

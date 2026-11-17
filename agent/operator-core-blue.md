@@ -487,10 +487,9 @@ tenant_reference_paths:
 Choose and register the backend `agent_id` before native launch. Pass it unchanged in
 Runtime Identity and backend writes. Bind the returned native client session/agent handle
 separately with `vigil assess agent bind-client-handle` unless the `Vigil dispatch binding:` line
-reports `bound` or `already_bound` (OpenCode 1: in the `task` result; OpenCode 2: a separate Vigil note in
-this session); the native handle never replaces the backend dispatch identity. On OpenCode 1 launch with
-the `task` tool and `subagent_type`; on OpenCode 2 with the `subagent` tool and `agent`, whose call returns
-at once while the child's result arrives later as a `<subagent …>` message.
+reports `bound` or `already_bound` (OpenCode: a separate Vigil note in this session); the native handle
+never replaces the backend dispatch identity. On OpenCode, launch with the `subagent` tool and `agent`,
+whose call returns at once while the child's result arrives later as a `<subagent …>` message.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist
 writes these values into the handoff JSON; `agent handoff` refuses an

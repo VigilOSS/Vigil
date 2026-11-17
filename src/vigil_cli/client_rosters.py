@@ -128,7 +128,7 @@ def ensure_opencode_agents_link(agent_root: Path, opencode_dir: Path) -> None:
     """Expose the generated OpenCode specialist roster inside an engagement cwd.
 
     OpenCode globs project agents from BOTH ``.opencode/agent/`` and
-    ``.opencode/agents/`` (the 1.17.5 loader scans ``{agent,agents}/**/*.md`` and
+    ``.opencode/agents/`` (the 2.3.0 loader scans ``{agent,agents}/**/*.md`` and
     follows symlinks), so — mirroring the dual ``plugin``/``plugins`` write — link
     the roster under both names. Both point at the single generated source roster
     ``agent/.opencode/agent``; the singular name remains the canonical one the
@@ -631,9 +631,9 @@ def ensure_opencode_plugin(agent_root: Path, opencode_dir: Path) -> None:
 
     Mirrors ``ensure_claude_settings``: refresh stale copies during repair so a
     fix to the standard activity-log plugin reaches existing engagements too.
-    Both OpenCode majors scan ``plugin/`` and ``plugins/``, and OpenCode 2
-    rejects a second module with the same plugin id, so the plugin lives only in
-    ``plugin/`` and a copy Vigil earlier wrote to ``plugins/`` is retired.
+    OpenCode scans ``plugin/`` and ``plugins/`` and rejects a second module with
+    the same plugin id, so the plugin lives only in ``plugin/`` and a copy Vigil
+    earlier wrote to ``plugins/`` is retired.
     """
     plugin_src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
     if not plugin_src.is_file():

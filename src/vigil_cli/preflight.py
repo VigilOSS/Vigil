@@ -84,7 +84,8 @@ def _preflight_engagement_start(
 ) -> None:
     """Validate the client and durable backend before launching a session.
 
-    A stopped managed backend starts here. An explicit endpoint is checked
+    An OpenCode release outside the supported range is refused before any side
+    effect. A stopped managed backend starts here. An explicit endpoint is checked
     without starting a different service. Static code review never queries
     Docker; audited execution starts its managed runtime on first use.
 
@@ -98,12 +99,16 @@ def _preflight_engagement_start(
             raise SystemExit("ZCode assessment start supports web/code only")
         from .remediation_clients import _zcode_application
         _zcode_application()
-    elif shutil.which(client) is None:
+    elif (executable := shutil.which(client)) is None:
         raise SystemExit(
             f"{client} CLI not found on PATH; install it, or start a different client "
             f"with `vigil engagement start {engagement_dir.name} --client <name>`. "
             "Pass --skip-preflight to launch anyway."
         )
+    elif client == "opencode":
+        # Before the backend, a track or any stdout: every OpenCode start refuses this too.
+        from . import opencode_launch
+        opencode_launch.probe_supported_version(executable)
     provider_key = None if client == "opencode" and mode in {"web", "code"} else CLIENT_PROVIDER_KEY.get(client)
     if provider_key and not _resolve_provider_key(
         install_root, engagement_dir, provider_key

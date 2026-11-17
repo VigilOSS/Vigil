@@ -1,4 +1,4 @@
-"""Native OpenCode discovery contracts verified on 1.18.10 and 1.19.3.
+"""Native OpenCode discovery contracts verified on 2.3.0.
 
 The native config loader scans plugin(s)/*.{ts,js}; merely writing a valid
 JavaScript module with another suffix does not register a lifecycle adapter.
@@ -29,7 +29,7 @@ def test_prepared_assessment_hook_is_discoverable_by_native_opencode(tmp_path, m
     monkeypatch.setattr(assessment_clients, "resolve_orchestrator_base_url", lambda *_: "http://127.0.0.1:9")
 
     workspace, _ = assessment_clients.prepare_workspace(
-        tmp_path / "private", engagement, "opencode", "code", native_version="1.18.10",
+        tmp_path / "private", engagement, "opencode", "code", native_version="opencode v2.3.0",
     )
     discovered = [
         path for directory in ("plugin", "plugins") for suffix in ("ts", "js")
@@ -94,8 +94,8 @@ def _discovered_plugins(opencode_dir: Path) -> list[Path]:
 
 
 def test_standard_engagement_plugin_is_discovered_once(tmp_path):
-    """Both OpenCode majors scan plugin/ and plugins/; OpenCode 2 rejects a
-    second module with the same plugin id."""
+    """OpenCode scans plugin/ and plugins/ and rejects a second module with
+    the same plugin id."""
     from vigil_cli import client_rosters, engagements
 
     agent_root = tmp_path / "agent"

@@ -280,9 +280,9 @@ vigil remediation -k <key> start --client zcode
 ```
 
 OpenCode uses its native TUI and receives the release's `/vigil-remediate`
-command through session configuration. A stable OpenCode 1.18.10 or newer, before 3.0, and the
-native `--prompt` option are required; on OpenCode 2 the TUI runs `--standalone`, with its own
-server, so the session configuration applies. Choose Z.AI Coding Plan with `/connect`
+command through session configuration. It requires the native `--prompt` option and refuses an
+OpenCode version it can read outside 2.3.0 or newer, before 3.0. The TUI runs `--standalone`, with
+its own server, so the session configuration applies. Choose Z.AI Coding Plan with `/connect`
 and your entitled model with `/models`. Vigil preserves native authentication,
 selected models, permissions, project configuration, and existing plugins.
 An existing inline command named `vigil-remediate` is a reported collision.

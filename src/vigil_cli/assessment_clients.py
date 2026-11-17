@@ -231,7 +231,7 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         native_config = {"$schema": "https://opencode.ai/config.json",
             "compaction": {"auto": True}, "instructions": [str(binding["project"]) + "/AGENTS.md"],
             "permission": dict(_OPENCODE_PERMISSION), "autoupdate": False,
-            # OpenCode 2 TUIs take no --agent; both majors honour default_agent.
+            # The TUI takes no --agent; default_agent selects the operator.
             "default_agent": "operator"}
         _deny_built_in_subagent_questions(native_config)
         workspace_files[".opencode/opencode.json"] = _json(native_config)
@@ -290,8 +290,12 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
 
 
 def start_client(install_root: Path, engagement: Path, client: str, mode: str,
-                 extra_args: list[str], *, no_autoprompt: bool = False) -> None:
-    """Start one selected mode; do not infer GUI native-session ownership."""
+                 extra_args: list[str], *, no_autoprompt: bool = False,
+                 opencode_version: str | None = None) -> None:
+    """Start one selected mode; do not infer GUI native-session ownership.
+
+    ``opencode_version`` is the reading ``start_engagement`` already gated.
+    """
     if mode not in {"web", "code"}:
         raise SystemExit("ZCode assessment launch supports web/code only")
     if client == "zcode" and any(argument.startswith("-") for argument in extra_args):
@@ -326,8 +330,8 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         if executable is None:
             raise SystemExit("OpenCode CLI not found on PATH")
         # An unverified version stays None in the binding; no native version is invented.
-        native_version = opencode_launch.probe_version(executable)
-    launch = (opencode_launch.plan_operator_launch(native_version, forwarded, os.environ.get("OPENCODE_CONFIG_CONTENT"))
+        native_version = opencode_version
+    launch = (opencode_launch.plan_operator_launch(forwarded, os.environ.get("OPENCODE_CONFIG_CONTENT"))
               if client == "opencode" else None)
     from .client_sessions import client_session_bootstrap, record_client_session
     # Native preparation writes only immutable task assets and its own stable
@@ -408,7 +412,7 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         "VIGIL_INSTALL_DIR": binding["install_root"], "VIGIL_CLIENT_NAME": client,
         "VIGIL_REQUESTED_CLIENT": client, "ORCHESTRATOR_BASE_URL": binding["backend_url"]})
     assert executable is not None and launch is not None
-    argv = [executable, *opencode_launch.operator_arguments(launch.major), *launch.arguments]
+    argv = [executable, opencode_launch.STANDALONE, *launch.arguments]
     # A resumed conversation already ran the startup procedure; only a focus is new.
     autoprompt = not no_autoprompt and not opencode_launch.resumes_session(launch.arguments)
     if autoprompt or focus is not None:

@@ -1,16 +1,15 @@
 """OpenCode version support and launch flags shared by every Vigil OpenCode start.
 
-Vigil supports OpenCode 1.18.10 or newer, before 3.0. The two majors take
-different TUI flags. OpenCode 1 selects the operator with ``--agent operator``
-and the model with ``--model``. OpenCode 2 has neither flag: ``default_agent``
-in the session's config selects the operator, the model rides the session's
-config content, and the TUI runs its own server (``--standalone``) because a
-background service would not inherit the session environment. Its hidden
-``--dangerously-skip-permissions`` alias is spelled ``--auto``.
+Vigil supports OpenCode 2.3.0 or newer, before 3.0. ``default_agent`` in the
+session's config selects the operator and the model rides the session's config
+content, because the TUI takes neither ``--agent`` nor ``--model``. The TUI runs
+its own server (``--standalone``) because a background service would not
+inherit the session environment. Its permission skip is spelled ``--auto``; a
+forwarded ``--dangerously-skip-permissions`` is passed as ``--auto``.
 
-Both majors take a new conversation's variant only from the per-model choice
-the TUI saves in ``$XDG_STATE_HOME/opencode/model.json``; a ``#variant`` on the
-model is split off and saved there before the TUI starts.
+A new conversation's variant comes only from the per-model choice the TUI saves
+in ``$XDG_STATE_HOME/opencode/model.json``; a ``#variant`` on the model is split
+off and saved there before the TUI starts.
 """
 from __future__ import annotations
 
@@ -25,50 +24,66 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import MutableMapping, TextIO
 
-MINIMUM = (1, 18, 10)
+MINIMUM = (2, 3, 0)
 BOUND = (3, 0, 0)
-SUPPORTED_RANGE = "OpenCode 1.18.10 or newer, before 3.0"
+SUPPORTED_RANGE = "OpenCode 2.3.0 or newer, before 3.0"
 PROBE_TIMEOUT_SECONDS = 10
 OPERATOR_AGENT = "operator"
+STANDALONE = "--standalone"
+SKIP_PERMISSIONS = "--auto"
 
-# One release line, as each major prints it: ``1.18.10`` or ``opencode v2.3.0``.
-_RELEASE = re.compile(r"\s*(?:opencode\s+)?v?(\d+)\.(\d+)\.(\d+)\s*")
-# The launch major is the first version token's major, read with this one POSIX
-# ERE (major in group 2) by Python and by the generated shell launcher alike.
-LAUNCHER_MAJOR_PATTERN = r"(^|[^0-9.])v?([0-9]+)\.[0-9]+\.[0-9]+"
-_VERSION_TOKEN = re.compile(LAUNCHER_MAJOR_PATTERN)
+SUPPORTED, UNVERIFIED, UNSUPPORTED = "supported", "unverified", "unsupported"
 
-_SKIP_PERMISSIONS = {1: "--dangerously-skip-permissions", 2: "--auto"}
+# One version line, as ``opencode --version`` prints it: ``opencode v2.3.0``,
+# ``2.3.0``, or a pre-release such as ``2.4.0-beta.1``.
+_VERSION = re.compile(r"\s*(?:opencode\s+)?v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?\s*")
+_SKIP_PERMISSIONS_ALIAS = "--dangerously-skip-permissions"
 _RESUME_FLAGS = ("-c", "--continue", "-s", "--session")
 
 
 def resumes_session(arguments: list[str]) -> bool:
-    """Whether the forwarded flags reopen an earlier conversation (same spelling on both majors)."""
+    """Whether the forwarded flags reopen an earlier conversation."""
     return any(argument in _RESUME_FLAGS or argument.startswith(("--continue=", "--session="))
                for argument in arguments)
 
 
-def parse_release(text: str | None) -> tuple[int, int, int] | None:
-    """The release ``opencode --version`` printed, or None when it is not one release line."""
-    match = _RELEASE.fullmatch(text or "")
+def version_support(version: str | None) -> str:
+    """How one ``opencode --version`` reading stands against SUPPORTED_RANGE.
+
+    SUPPORTED is a stable release in the range. UNSUPPORTED is a version readable
+    as outside it. A pre-release precedes its release, so one is readable as
+    outside the range unless its release lies strictly inside it: ``2.3.0-beta``
+    and ``3.0.0-rc.1`` are UNSUPPORTED. UNVERIFIED is anything else: a
+    pre-release such as ``2.4.0-beta``, or no readable version at all.
+    """
+    match = _VERSION.fullmatch(version or "")
     if match is None:
-        return None
-    major, minor, patch = (int(part) for part in match.groups())
-    return major, minor, patch
+        return UNVERIFIED
+    release = (int(match[1]), int(match[2]), int(match[3]))
+    if match[4] is None:
+        return SUPPORTED if MINIMUM <= release < BOUND else UNSUPPORTED
+    return UNVERIFIED if MINIMUM < release < BOUND else UNSUPPORTED
 
 
-def is_supported(release: tuple[int, int, int]) -> bool:
-    return MINIMUM <= release < BOUND
+def require_supported(version: str | None) -> None:
+    """Refuse a version readable as outside SUPPORTED_RANGE.
 
-
-def launch_major(version: str | None) -> int:
-    """2 for OpenCode 2 or later; 1 otherwise, including an unreadable version."""
-    match = _VERSION_TOKEN.search(version or "")
-    return 2 if match is not None and int(match.group(2)) >= 2 else 1
+    An unreadable version is not evidence of an unsupported install, so the
+    start proceeds.
+    """
+    if version_support(version) == UNSUPPORTED:
+        match = _VERSION.fullmatch(version or "")
+        assert match is not None
+        raise SystemExit(f"OpenCode {match[1]}.{match[2]}.{match[3]}{match[4] or ''} is outside the "
+                         f"supported range; install stable {SUPPORTED_RANGE}")
 
 
 def probe_version(executable: str) -> str | None:
-    """``<executable> --version`` output, or None when the bounded probe fails."""
+    """``<executable> --version`` output, or None when the bounded probe fails.
+
+    The one reading every start and client-check uses. A non-zero exit or a
+    timeout is a failed probe, not a version.
+    """
     try:
         result = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                 check=False, timeout=PROBE_TIMEOUT_SECONDS)
@@ -79,46 +94,27 @@ def probe_version(executable: str) -> str | None:
     return result.stdout.strip() or result.stderr.strip() or None
 
 
-def server_arguments(major: int) -> list[str]:
-    """OpenCode 2 runs a private server so it inherits the launch environment."""
-    return ["--standalone"] if major >= 2 else []
-
-
-def operator_arguments(major: int) -> list[str]:
-    """Flags that start the TUI as the Vigil operator.
-
-    OpenCode 2 reads the operator from the session config's ``default_agent``.
-    """
-    return [*server_arguments(major), *(["--agent", OPERATOR_AGENT] if major < 2 else [])]
-
-
-def skip_permissions_argument(major: int) -> str:
-    return _SKIP_PERMISSIONS[2 if major >= 2 else 1]
+def probe_supported_version(executable: str) -> str | None:
+    """The installed version, refusing one readable as outside SUPPORTED_RANGE."""
+    version = probe_version(executable)
+    require_supported(version)
+    return version
 
 
 def launcher_exec_block(skip_permissions: bool) -> str:
-    """The generated launcher's exec: the installed major selects the flags at run time.
+    """The generated launcher's exec.
 
-    OpenCode 2 rejects a repeated flag, so a forwarded ``--auto`` (how a Vigil
-    start forwards the permission skip there) replaces the launcher's own.
+    OpenCode rejects a repeated flag, so a forwarded ``--auto`` (how a Vigil
+    start forwards the permission skip) replaces the launcher's own.
     """
-    def command(major: int, *, skip: bool = skip_permissions) -> str:
-        arguments = [*operator_arguments(major), *([skip_permissions_argument(major)] if skip else [])]
-        return " ".join(["exec opencode", *arguments, '"$@"'])
-
-    forwarded_skip = (
-        '  for opencode_argument in "$@"; do\n'
-        f'    [[ "$opencode_argument" != {_SKIP_PERMISSIONS[2]} ]] || {command(2, skip=False)}\n'
-        "  done\n"
-    ) if skip_permissions else ""
+    command = f"exec opencode {STANDALONE}"
+    if not skip_permissions:
+        return f'{command} "$@"'
     return (
-        'opencode_version="$(opencode --version 2>/dev/null || true)"\n'
-        f"opencode_major_pattern='{LAUNCHER_MAJOR_PATTERN}'\n"
-        'if [[ "$opencode_version" =~ $opencode_major_pattern ]] && (( 10#${BASH_REMATCH[2]} >= 2 )); then\n'
-        f"{forwarded_skip}"
-        f"  {command(2)}\n"
-        "fi\n"
-        f"{command(1)}"
+        'for opencode_argument in "$@"; do\n'
+        f'  [[ "$opencode_argument" != {SKIP_PERMISSIONS} ]] || {command} "$@"\n'
+        "done\n"
+        f'{command} {SKIP_PERMISSIONS} "$@"'
     )
 
 
@@ -126,7 +122,6 @@ def launcher_exec_block(skip_permissions: bool) -> str:
 class Launch:
     """A validated operator launch, before any side effect."""
 
-    major: int
     arguments: list[str]
     variants: dict[str, str]
     variant_state: tuple[Path, dict] | None
@@ -134,34 +129,31 @@ class Launch:
     config_content: str | None
 
 
-def plan_operator_launch(version: str | None, forwarded: list[str], config_content: str | None) -> Launch:
-    """Map 1.x-style operator flags onto the installed major.
+def plan_operator_launch(forwarded: list[str], config_content: str | None) -> Launch:
+    """Map forwarded operator flags onto the TUI's launch.
 
-    OpenCode 1 keeps ``--model`` without its ``#variant``. OpenCode 2 moves the
-    model into the session config, as its default and as the operator agent's
-    model, which outranks a model pinned in the operator wrapper exactly as
-    ``--model`` does on 1.x.
+    The model moves into the session config, as its default and as the operator
+    agent's model, so it outranks a model pinned in the operator wrapper. The
+    start supplies ``--standalone`` itself, and each flag is passed once.
     """
-    major = launch_major(version)
     arguments: list[str] = []
     variants: dict[str, str] = {}
     model = None
     tail = iter(forwarded)
     for argument in tail:
-        flag, value = argument, None
+        value = None
         for name in ("--model", "-m"):
             if argument == name:
                 value = next(tail, None)
                 if value is None:
                     raise SystemExit(f"OpenCode {name} requires provider/model or provider/model#variant")
             elif argument.startswith(name + "="):
-                flag, value = name + "=", argument.split("=", 1)[1]
+                value = argument.split("=", 1)[1]
         if value is None:
-            if major >= 2 and argument == _SKIP_PERMISSIONS[1]:
-                argument = _SKIP_PERMISSIONS[2]
-            # OpenCode 2 rejects a repeated flag; the start itself supplies --standalone.
-            if major < 2 or (argument not in server_arguments(major)
-                             and not (argument == _SKIP_PERMISSIONS[2] and argument in arguments)):
+            if argument == _SKIP_PERMISSIONS_ALIAS:
+                argument = SKIP_PERMISSIONS
+            # OpenCode rejects a repeated flag; the start itself supplies --standalone.
+            if argument != STANDALONE and not (argument == SKIP_PERMISSIONS and argument in arguments):
                 arguments.append(argument)
             continue
         bare, separator, variant = value.partition("#")
@@ -169,11 +161,8 @@ def plan_operator_launch(version: str | None, forwarded: list[str], config_conte
             if "/" not in bare.strip("/") or not variant or "#" in variant:
                 raise SystemExit(f"OpenCode --model {value!r} must be provider/model#variant")
             variants[bare] = variant
-        if major >= 2:
-            model = value
-        else:
-            arguments.extend([flag + bare] if flag.endswith("=") else [flag, bare])
-    return Launch(major, arguments, variants, _variant_state(variants), model,
+        model = value
+    return Launch(arguments, variants, _variant_state(variants), model,
                   _operator_config_content(config_content, model) if model is not None else None)
 
 

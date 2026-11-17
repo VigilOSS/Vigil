@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -51,10 +52,14 @@ def launch(tmp_path, monkeypatch):
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
-        output = "1.18.10" if argv == ["opencode", "--version"] else "--prompt text"
+        output = "opencode v2.3.0" if argv == ["opencode", "--version"] else "--prompt text"
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(sessions.subprocess, "run", run)
+    # Remediation finds the installed client by name before probing it.
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs:
+                        "/native/opencode" if name == "opencode" else original_which(name, *args, **kwargs))
     return SimpleNamespace(root=root, engagement=engagement, repository=repository,
                            project=project, calls=calls, sessions=sessions)
 
@@ -78,7 +83,7 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"model": "zai-coding-plan/selected", "permission": "ask"}))
     assert start(launch, "opencode") == 0
     argv, options = launch.calls[-1]
-    assert argv[:2] == ["opencode", "--prompt"]
+    assert argv[:3] == ["opencode", "--standalone", "--prompt"]
     assert options["cwd"] == launch.repository
     config = json.loads(options["env"]["OPENCODE_CONFIG_CONTENT"])
     assert config["model"] == "zai-coding-plan/selected"
@@ -89,7 +94,7 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     assert options["env"]["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
     starts, _ = historical_client_starts(launch.root)
     assert [(row["client"], row["mode"], row["event"]) for row in starts] == [("opencode", "remediation", "launch_requested")]
-    assert str(launch.project["_profile_path"]) in argv[2]
+    assert str(launch.project["_profile_path"]) in argv[3]
     assert list(launch.repository.iterdir()) == []
     assert not launch.engagement.exists()
 
@@ -127,14 +132,14 @@ def test_opencode_accepts_help_written_to_stderr(launch, monkeypatch):
     def run(argv, **options):
         launch.calls.append((argv, options))
         if argv == ["opencode", "--version"]:
-            return subprocess.CompletedProcess(argv, 0, "1.18.10\n", "")
+            return subprocess.CompletedProcess(argv, 0, "opencode v2.3.0\n", "")
         if argv == ["opencode", "--help"]:
             return subprocess.CompletedProcess(argv, 0, "", "Options:\n  --prompt  prompt to use\n")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(launch.sessions.subprocess, "run", run)
     assert start(launch, "opencode") == 0
-    assert launch.calls[-1][0][:2] == ["opencode", "--prompt"]
+    assert launch.calls[-1][0][:3] == ["opencode", "--standalone", "--prompt"]
 
 
 @pytest.mark.parametrize("client", ["opencode", "zcode"])
@@ -154,9 +159,11 @@ def test_unsupported_session_policy_fails_before_probe_or_mutation(launch, clien
     assert not launch.engagement.exists()
 
 
-@pytest.mark.parametrize("version,help_output", [("0.9.0", "--prompt text"), ("1.18.9", "--prompt text"),
-                                                  ("opencode v3.0.0", "--prompt text"), ("1.18.10", "--model text")])
-def test_opencode_refuses_unverified_version_or_missing_prompt_before_launch(launch, monkeypatch, version, help_output):
+@pytest.mark.parametrize("version,help_output", [("0.9.0", "--prompt text"), ("1.18.10", "--prompt text"),
+                                                  ("opencode v2.2.0", "--prompt text"),
+                                                  ("opencode v3.0.0", "--prompt text"),
+                                                  ("opencode v2.3.0", "--model text")])
+def test_opencode_refuses_an_unsupported_release_or_missing_prompt_before_launch(launch, monkeypatch, version, help_output):
     def run(argv, **options):
         launch.calls.append((argv, options))
         return subprocess.CompletedProcess(argv, 0, version if argv[-1] == "--version" else help_output, "")
@@ -167,26 +174,40 @@ def test_opencode_refuses_unverified_version_or_missing_prompt_before_launch(lau
     assert not launch.engagement.exists()
 
 
+@pytest.mark.parametrize("version", ["opencode v2.3", "opencode 2.3.0 (update 2.4.0 available)", ""])
+def test_opencode_with_an_unreadable_version_starts_with_the_supported_flags(launch, monkeypatch, version):
+    def run(argv, **options):
+        launch.calls.append((argv, options))
+        return subprocess.CompletedProcess(argv, 0, version if argv[-1] == "--version" else "--prompt text", "")
+    monkeypatch.setattr(launch.sessions.subprocess, "run", run)
+    assert start(launch, "opencode") == 0
+    assert launch.calls[-1][0][:3] == ["opencode", "--standalone", "--prompt"]
+
+
 def test_missing_opencode_reports_installation_requirement(launch, monkeypatch):
-    def missing(*args, **kwargs):
-        raise FileNotFoundError
-    monkeypatch.setattr(launch.sessions.subprocess, "run", missing)
-    with pytest.raises(SystemExit, match="OpenCode"):
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    with pytest.raises(SystemExit, match="OpenCode CLI is required"):
         start(launch, "opencode")
+    assert launch.calls == []
 
 
 @pytest.mark.parametrize("probe", [["opencode", "--version"], ["opencode", "--help"]])
-def test_opencode_probe_timeout_is_actionable_and_bounded(launch, monkeypatch, probe):
+def test_opencode_probe_timeout_is_bounded(launch, monkeypatch, probe):
+    """A timed-out --version is an unreadable version, which proceeds as every
+    start does; the --help probe is the capability check, so its timeout refuses."""
     def timeout(argv, **kwargs):
         launch.calls.append((argv, kwargs))
         if argv == probe:
             raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
-        return subprocess.CompletedProcess(argv, 0, "1.18.10", "")
+        return subprocess.CompletedProcess(argv, 0, "opencode v2.3.0" if argv[-1] == "--version" else "--prompt text", "")
 
     monkeypatch.setattr(launch.sessions.subprocess, "run", timeout)
-    with pytest.raises(SystemExit, match="timed out"):
-        start(launch, "opencode")
-    assert all(options.get("timeout") is not None for _, options in launch.calls)
+    if probe[-1] == "--help":
+        with pytest.raises(SystemExit, match="timed out"):
+            start(launch, "opencode")
+    else:
+        assert start(launch, "opencode") == 0
+    assert all(options.get("timeout") is not None for argv, options in launch.calls if argv[-1] in ("--version", "--help"))
 
 
 def test_zcode_prepares_context_plugin_and_opens_repository_without_false_session_receipt(launch, monkeypatch, tmp_path, capsys):

@@ -14,7 +14,7 @@ from vigil_cli import assessment_clients as clients
 from vigil_cli import client_sessions
 from vigil_cli import engagements
 from vigil_cli import main as cli
-from vigil_cli import remediation_clients, term
+from vigil_cli import opencode_launch, remediation_clients, term
 from vigil_cli.assessment_clients import prepare_workspace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -214,7 +214,7 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     root, engagement, receipts = context
     original = clients.shutil.which
     monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
-    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="opencode v2.3.0", stderr=""))
     calls = []
     monkeypatch.chdir(ROOT)
     monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append((path, argv, env)))
@@ -247,33 +247,6 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]
 
 
-@pytest.mark.parametrize("arguments", [["--model=acme/model-1#max"], ["--model", "acme/model-1#max"],
-                                       ["-m", "acme/model-1#max"]])
-def test_opencode_start_applies_a_model_variant_the_tui_reads(context, monkeypatch, tmp_path, arguments):
-    root, engagement, _ = context
-    state = tmp_path / "state"
-    saved = state / "opencode/model.json"
-    saved.parent.mkdir(parents=True)
-    saved.write_text(json.dumps({"recent": [{"providerID": "acme", "modelID": "model-1"}],
-                                 "variant": {"acme/model-1": "high", "acme/model-2": "low"}}))
-    monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    original = clients.shutil.which
-    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
-    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
-    calls = []
-    monkeypatch.chdir(ROOT)
-    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append(argv))
-    engagements.start_engagement(root, engagement, "opencode", arguments, "code")
-    argv = calls[0]
-    # The TUI rejects a model id that carries a #variant, and takes its opening
-    # variant only from the per-model choice it saved.
-    models = [argument.split("=", 1)[1] for argument in argv if argument.startswith("--model=")]
-    models += [argv[index + 1] for index, argument in enumerate(argv) if argument in ("--model", "-m")]
-    assert models == ["acme/model-1"]
-    assert json.loads(saved.read_text()) == {"recent": [{"providerID": "acme", "modelID": "model-1"}],
-                                             "variant": {"acme/model-1": "max", "acme/model-2": "low"}}
-
-
 @pytest.mark.parametrize("saved_text", ["[]", "{", '{"variant": []}'])
 def test_opencode_variant_refuses_an_unreadable_native_choice_file(context, monkeypatch, tmp_path, saved_text):
     root, engagement, _ = context
@@ -283,7 +256,7 @@ def test_opencode_variant_refuses_an_unreadable_native_choice_file(context, monk
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     original = clients.shutil.which
     monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
-    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="opencode v2.3.0", stderr=""))
     calls = []
     monkeypatch.setattr(clients.os, "execve", lambda *args: calls.append(args))
     with pytest.raises(SystemExit, match="model.json"):
@@ -319,12 +292,13 @@ def test_opencode_helper_path_finds_opencode_by_its_linked_name(context, monkeyp
 
 @pytest.mark.parametrize("arguments", [
     ["--model", "zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"],
-    ["--model=zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"]])
+    ["--model=zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"],
+    ["-m", "zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"]])
 @pytest.mark.parametrize("version_output", ["opencode v2.3.0\n", "2.3.0"])
-def test_opencode_2_start_selects_the_operator_and_model_through_config(context, monkeypatch, tmp_path,
-                                                                       arguments, version_output):
-    """OpenCode 2 TUIs take neither --agent nor --model, and a background service
-    would not see the session environment, so the launch runs standalone."""
+def test_opencode_start_selects_the_operator_and_model_through_config(context, monkeypatch, tmp_path,
+                                                                     arguments, version_output):
+    """The TUI takes neither --agent nor --model, and a background service would
+    not see the session environment, so the launch runs standalone."""
     root, engagement, _ = context
     saved = tmp_path / "state/opencode/model.json"
     saved.parent.mkdir(parents=True)
@@ -354,7 +328,80 @@ def test_opencode_2_start_selects_the_operator_and_model_through_config(context,
 
 
 @pytest.mark.parametrize("mode", ["web", "code"])
-@pytest.mark.parametrize("version_output", ["1.18.10", "opencode v2.3.0\n"])
+@pytest.mark.parametrize("version_output", ["1.18.10", "opencode v2.2.0\n", "opencode v3.0.0\n"])
+def test_opencode_start_refuses_a_release_outside_the_supported_range(context, monkeypatch, mode, version_output):
+    root, engagement, receipts = context
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout=version_output, stderr=""))
+    calls = []
+    monkeypatch.setattr(clients.os, "execve", lambda *args: calls.append(args))
+    with pytest.raises(SystemExit, match=re.escape(opencode_launch.SUPPORTED_RANGE)):
+        engagements.start_engagement(root, engagement, "opencode", [], mode)
+    assert calls == []
+    assert receipts == []
+    assert not (engagement / "client-context").exists()
+
+
+def test_opencode_start_refuses_an_unsupported_release_before_adding_a_track(context, monkeypatch):
+    root, engagement, _ = context
+    (engagement / "scope.json").write_text(json.dumps({"status": "in_progress", "engagement_type": "offensive",
+                                                       "tracks": {"web": {"phase": "recon"}}}))
+    added = []
+    monkeypatch.setattr(engagements, "add_engagement_track", lambda *a, **k: added.append(a))
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="1.18.10", stderr=""))
+    with pytest.raises(SystemExit, match=re.escape(opencode_launch.SUPPORTED_RANGE)):
+        engagements.start_engagement(root, engagement, "opencode", [], "code")
+    assert added == []
+
+
+def test_opencode_start_reads_the_version_once(context, monkeypatch):
+    root, engagement, _ = context
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    real_run = clients.subprocess.run
+    probes = []
+
+    def run(argv, *args, **kwargs):
+        if list(argv) == ["/native/opencode", "--version"]:
+            probes.append(argv)
+            return SimpleNamespace(returncode=0, stdout="opencode v2.3.0", stderr="")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(clients.subprocess, "run", run)
+    calls = []
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append(env))
+    engagements.start_engagement(root, engagement, "opencode", [], "web")
+    assert len(probes) == 1
+    assert json.loads(Path(calls[0]["VIGIL_CLIENT_CONTEXT"]).read_text())["native_version"] == "opencode v2.3.0"
+
+
+@pytest.mark.parametrize("probe", [SimpleNamespace(returncode=1, stdout="", stderr="boom"),
+                                   SimpleNamespace(returncode=0, stdout="opencode 2.3.0 (update 2.4.0 available)",
+                                                   stderr="")])
+def test_opencode_start_with_an_unreadable_version_uses_the_supported_flags(context, monkeypatch, probe):
+    root, engagement, _ = context
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: probe)
+    calls = []
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append((path, argv, env)))
+    engagements.start_engagement(root, engagement, "opencode", ["--model=acme/model-1"], "web")
+    _, argv, environment = calls[0]
+    assert argv[:2] == ["/native/opencode", "--standalone"]
+    assert "--agent" not in argv
+    assert json.loads(environment["OPENCODE_CONFIG_CONTENT"])["model"] == "acme/model-1"
+    binding = json.loads(Path(environment["VIGIL_CLIENT_CONTEXT"]).read_text())
+    expected = None if probe.returncode else probe.stdout
+    assert binding["native_version"] == expected
+
+
+@pytest.mark.parametrize("mode", ["web", "code"])
+@pytest.mark.parametrize("version_output", ["opencode v2.3.0\n", "2.4.1"])
 @pytest.mark.parametrize(("arguments", "focus"), [
     (["-c"], None), (["--continue"], None), (["-s", "ses_acme"], None), (["--session", "ses_acme"], None),
     (["--session=ses_acme"], None), (["-c", "--prompt", "check Acme's parser"], "check Acme's parser"),

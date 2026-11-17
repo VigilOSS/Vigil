@@ -2823,8 +2823,8 @@ def _start_swarm(args) -> None:
         )
     print(
         "Next: launch one fresh specialist per row using the native role-selection schema "
-        "(Agent with the registered subagent_type in Claude Code; task with subagent_type on OpenCode 1, "
-        "subagent with agent on OpenCode 2; the actual spawn schema in Codex), "
+        "(Agent with the registered subagent_type in Claude Code; subagent with agent in OpenCode; "
+        "the actual spawn schema in Codex), "
         f"{identity_instruction}. The specialist reads its "
         "batch range from its own dispatch row via `vigil assess agent get <agent_id>`."
     )

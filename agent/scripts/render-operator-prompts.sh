@@ -643,14 +643,14 @@ agent_description() {
 #
 # Fast+deep variant pairs (OpenCode ONLY): OpenCode subagents inherit the
 # invoking primary's model unless the wrapper pins `model:`, and OpenCode's
-# task/dispatch has no per-call model override — the model is strictly the
+# subagent dispatch has no per-call model override — the model is strictly the
 # wrapper file's frontmatter `model:` at dispatch time. So for OpenCode we emit,
 # for every role, the canonical tier (from agent_model below) AND an
 # opposite-tier sibling so the operator can dispatch either a fast (Flash) or a
 # deep (Pro) variant of any specialist by name (`<role>` + `<role>-pro` or
 # `<role>-flash`). The sibling shares the canonical's prompt body verbatim; only
 # the `model:` frontmatter and a short description suffix differ. The variant
-# pair is OpenCode-only, because OpenCode task dispatch has no per-call override.
+# pair is OpenCode-only, because OpenCode subagent dispatch has no per-call override.
 # A Claude Code wrapper pins `model:`/`effort:` only for the roles in
 # claude_wrapper_model_frontmatter below; Codex wrappers carry no pin. See
 # render_opencode_wrapper / opencode_variant_suffix below.
@@ -1012,7 +1012,7 @@ EOF
 # OpenCode never auto-answers its question tool, so a specialist that asks one
 # would hold its dispatch, and an unattended run, until someone answers. Every
 # specialist wrapper (standard and assessment trees) denies it; only the operator
-# talks to the user. OpenCode 1 and 2 both read this frontmatter permission.
+# talks to the user. OpenCode reads this frontmatter permission.
 OPENCODE_SPECIALIST_PERMISSION=$'permission:\n  question: deny\n'
 
 # Write a single OpenCode wrapper for $agent_name pinned to $model. The optional
@@ -1035,16 +1035,13 @@ render_one_opencode_wrapper() {
 
   # OpenCode agent frontmatter: description + mode + model (+ the specialist
   # permission above). Specialists are `mode: subagent` so they are dispatchable
-  # only by the operator (`task` on OpenCode 1, `subagent` on OpenCode 2), never
-  # a primary entrypoint. The OPERATOR is `mode: primary` because the generated
-  # start_opencode.sh selects it as the top-level brain (`--agent operator` on
-  # OpenCode 1, the engagement config's `default_agent` on OpenCode 2): OpenCode
-  # refuses a `mode: subagent` entrypoint — it prints "agent X is a subagent, not
-  # a primary agent. Falling back to default agent" and silently runs the
-  # built-in `build` primary instead, which reads AGENTS.md as mere context and
-  # does the work inline (0 specialist dispatches). `model` is pinned on EVERY
-  # role because OpenCode subagents otherwise inherit the invoking primary's
-  # model, defeating routing.
+  # only by the operator (its `subagent` tool), never a primary entrypoint. The
+  # OPERATOR is `mode: primary` because the engagement config's `default_agent`
+  # selects it as the top-level brain: OpenCode refuses a `mode: subagent`
+  # default agent and, with only a warning, runs the built-in `build` primary
+  # instead, which reads AGENTS.md as mere context and does the work inline
+  # (0 specialist dispatches). `model` is pinned on EVERY role because OpenCode
+  # subagents otherwise inherit the invoking primary's model, defeating routing.
   if [[ "$agent_name" == "operator" ]]; then
     {
       cat <<EOF
