@@ -1251,6 +1251,26 @@ _POST_TOOL_LOG_PIN_CASES: list[tuple[str, object, list[list[str]]]] = [
         "tool_input": {"command": "xxd -r dump"},
         "tool_response": {"stdout": "Q" * 400 + "\u0000", "exitCode": 0},
     }, [["operator", "Bash", "bash: xxd -r dump", "Q" * 300]]),
+    # A NUL byte (a \u0000 escape, or a raw byte in the payload) never reaches a field.
+    ("bash_nul_inside_the_command", {
+        "tool_name": "Bash", "tool_use_id": "tu-nulc", "tool_input": {"command": "rg a\u0000b"},
+    }, [["operator", "Bash", "bash: rg ab", ""]]),
+    ("agent_nul_inside_the_kept_prompt", {
+        "tool_name": "Agent", "tool_use_id": "tu-nulp",
+        "tool_input": {"subagent_type": "recon-specialist", "description": "Map", "prompt": "P\u0000" + "Q" * 200},
+    }, [["operator", "Dispatch: recon-specialist", "Map", "P" + "Q" * 148]]),
+    ("mcp_nul_inside_the_result", {
+        "tool_name": "mcp__acme__x", "tool_use_id": "tu-nulm", "tool_input": {"q": "a\u0000"},
+        "tool_response": {"result": "r\u0000s"},
+    }, [["operator", "mcp__acme__x", 'mcp args={"q":"a\\u0000"}', "rs"]]),
+    ("apply_patch_nul_inside_a_file_name", {
+        "tool_name": "apply_patch", "tool_use_id": "tu-nula",
+        "tool_input": {"command": "*** Begin Patch\n*** Add File: a\u0000b.py\n*** End Patch"},
+        "tool_response": {"output": "ok"},
+    }, [["operator", "apply_patch", "files=ab.py", "ok"]]),
+    ("raw_nul_byte_in_the_payload",
+     '{"tool_name":"Bash","cwd":"<ENG>","tool_use_id":"tu-raw",\x00"tool_input":{"command":"rg raw"}}',
+     [["operator", "Bash", "bash: rg raw", ""]]),
     ("bash_echo_option_command", {
         "tool_name": "Bash", "tool_use_id": "tu-dash",
         "tool_input": {"command": "-n"},

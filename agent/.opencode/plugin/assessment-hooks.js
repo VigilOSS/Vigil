@@ -309,10 +309,10 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
   const logHook = context => join(context.agent_root, "scripts/hooks/post-tool-log.sh")
   // The same two shell programs, and UNSPOOLED, are in standard-hooks.js.
   // CLAIM <bash> <row file> <hook>: runs the hook on the row unless it is already claimed;
-  // exits UNSPOOLED when the row's file is gone.
+  // exits UNSPOOLED when the row's file is gone, before or after its claim.
   const UNSPOOLED = 75
   const CLAIM = 'set -C; { printf %s "$$" > "$2.claim"; } 2>/dev/null || { [ -e "$2.claim" ] && exit 0; exit 75; }; '
-    + 'exec "$1" "$3" < "$2"'
+    + '{ exec 3< "$2"; } 2>/dev/null || exit 75; exec "$1" "$3" <&3 3<&-'
   // DRAIN <spool> <bash> <hook>: once this process ends, waits for each claimed row's
   // hook (as long as a hook may run), then writes the unclaimed rows in order.
   const DRAIN = 'w() { p=; read -r p < "$1"; [ -n "$p" ] || { sleep 0.05; read -r p < "$1"; }; n=0; '
@@ -408,8 +408,9 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
     if (item.failed) return console.error(`[vigil] Native activity was not recorded: ${item.failed.message}`)
     if (!existsSync(item.file)) place(item)
     try { await runHook(item) } catch (error) {
-      // A row whose file went before its hook claimed it is spooled again and written once more.
+      // A row whose file went before its hook read it is spooled again (its claim with it) and written once more.
       if (error.unspooled) {
+        unspool(item)
         place(item)
         return await runHook(item)
       }

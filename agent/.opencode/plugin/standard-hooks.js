@@ -77,10 +77,10 @@ let sequence = 0
 
 // The same two shell programs, and UNSPOOLED, are in assessment-hooks.js.
 // CLAIM <bash> <row file> <hook>: runs the hook on the row unless it is already claimed;
-// exits UNSPOOLED when the row's file is gone.
+// exits UNSPOOLED when the row's file is gone, before or after its claim.
 const UNSPOOLED = 75
 const CLAIM = 'set -C; { printf %s "$$" > "$2.claim"; } 2>/dev/null || { [ -e "$2.claim" ] && exit 0; exit 75; }; '
-  + 'exec "$1" "$3" < "$2"'
+  + '{ exec 3< "$2"; } 2>/dev/null || exit 75; exec "$1" "$3" <&3 3<&-'
 // DRAIN <spool> <bash> <hook>: once this process ends, waits for each claimed row's
 // logger (as long as a logger may run), then writes the unclaimed rows in order.
 const DRAIN = 'w() { p=; read -r p < "$1"; [ -n "$p" ] || { sleep 0.05; read -r p < "$1"; }; n=0; '
@@ -167,9 +167,9 @@ function pump() {
       settled = true
       clearTimeout(entry.timer)
       running.delete(lane)
-      // A row whose file went before its logger claimed it is queued again, at its place.
+      // A row whose file went before its logger read it is queued again (its claim cleared), at its place.
       let again = false
-      try { again = code === UNSPOOLED && !write.replaced && !existsSync(write.file) && (place(write), write.replaced = true) }
+      try { again = code === UNSPOOLED && !write.replaced && !existsSync(write.file) && (unspool(write), place(write), write.replaced = true) }
       catch (e) { /* dropped, as a row that cannot be spooled */ }
       if (again) {
         if (!lanes.has(lane)) lanes.set(lane, [])

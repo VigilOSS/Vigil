@@ -24,7 +24,11 @@
 
 # No set -e: jq/grep returning empty is expected, not an error.
 
-INPUT=$(cat)
+# NUL bytes. A command substitution drops each NUL byte it reads, and bash 5 says so
+# on stderr. Every substitution that can read payload bytes drops them itself with
+# `LC_ALL=C tr -d '\000'`, after any byte prefix is cut, so the hook stays silent and its
+# fields are the bytes the substitution alone would keep.
+INPUT=$(LC_ALL=C tr -d '\000')
 
 # --- Ignored tools ---
 # Read, Grep, WebFetch and every other tool without a row below are settled from
@@ -148,7 +152,8 @@ read_hook_fields() {
 }
 
 # hook_field_output NAME prints what the field's own jq call prints, so a
-# pipeline over it (`| head -c 300`) sees the same bytes.
+# pipeline over it (`| head -c 300`) sees the same bytes. Only that jq call can
+# print a NUL byte (from a \u0000 escape); a field read by read_hook_fields holds none.
 hook_field_output() {
   if [ -n "$HOOK_FIELDS_READ" ]; then
     local ref="HOOK_FIELD_$1"
@@ -175,11 +180,20 @@ hook_value() {
       value=${value%$'\n'}
     done
   elif [ $# -ge 3 ]; then
-    value=$(hook_field_output "$2" || echo "$3")
+    value=$({ hook_field_output "$2" || echo "$3"; } | LC_ALL=C tr -d '\000')
   else
-    value=$(hook_field_output "$2")
+    value=$(hook_field_output "$2" | LC_ALL=C tr -d '\000')
   fi
   printf -v "$1" '%s' "$value"
+}
+
+# hook_field_prefix NAME BYTES prints the field's first BYTES bytes, NUL bytes dropped.
+hook_field_prefix() {
+  if [ -n "$HOOK_FIELDS_READ" ]; then
+    hook_field_output "$1" | head -c "$2"
+  else
+    hook_field_output "$1" | head -c "$2" | LC_ALL=C tr -d '\000'
+  fi
 }
 
 read_hook_fields || true
@@ -349,7 +363,7 @@ case "$TOOL_NAME" in
     fi
 
     # Output summary: the first 300 bytes of the tool response.
-    OUTPUT_SUMMARY=$(hook_field_output response_text | head -c 300 || true)
+    OUTPUT_SUMMARY=$(hook_field_prefix response_text 300 || true)
     hook_value EXIT_CODE exit_code
 
     ACTION="bash: $SHORT_CMD"
@@ -374,7 +388,7 @@ case "$TOOL_NAME" in
   Agent)
     hook_value SUBAGENT subagent
     hook_value DESCRIPTION description
-    PROMPT_PREVIEW=$(hook_field_output prompt | head -c 150 || true)
+    PROMPT_PREVIEW=$(hook_field_prefix prompt 150 || true)
 
     TITLE="Dispatch: ${SUBAGENT:-unknown}"
     ACTION="${DESCRIPTION:-dispatch}"
@@ -397,19 +411,20 @@ case "$TOOL_NAME" in
     ;;
 
   apply_patch)
-    FILES=$(hook_field_output command \
+    # NULs go before sed: BSD sed ends a line at one, GNU sed keeps it.
+    FILES=$(hook_field_output command | LC_ALL=C tr -d '\000' \
       | sed -nE 's/^\*\*\* (Add|Update|Delete) File: //p' \
       | sort -u \
       | awk 'BEGIN { sep = "" } { printf "%s%s", sep, $0; sep = ", " } END { if (sep != "") print "" }' \
       2>/dev/null || true)
     [ -z "$FILES" ] && FILES="unknown files"
-    RESULT=$(hook_field_output response_text | head -c 300 || true)
+    RESULT=$(hook_field_prefix response_text 300 || true)
     post_activity_entry_or_release "hook" "apply_patch" "files=${FILES}" "$RESULT"
     ;;
 
   mcp__*)
-    ARG_PREVIEW=$(hook_field_output mcp_args | head -c 300 || true)
-    RESULT=$(hook_field_output response_text | head -c 300 || true)
+    ARG_PREVIEW=$(hook_field_prefix mcp_args 300 || true)
+    RESULT=$(hook_field_prefix response_text 300 || true)
     post_activity_entry_or_release "hook" "$TOOL_NAME" "mcp args=${ARG_PREVIEW}" "$RESULT"
     ;;
 

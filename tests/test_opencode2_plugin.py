@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -805,7 +806,10 @@ if (isMainThread && ending === 'worker') {
   for (const [index, event] of options.events.entries()) {
     // Something else removes the plugin's private spool folders after this many calls.
     if (index === options.removeSpoolsAfter) for (const name of readdirSync(tmpdir()))
-      if (name.startsWith('vigil-activity-')) rmSync(join(tmpdir(), name), {recursive: true, force: true});
+      // A starting logger may write its claim there meanwhile (ENOTEMPTY); remove until it is gone.
+      if (name.startsWith('vigil-activity-'))
+        for (let attempt = 0; ; attempt++) try { rmSync(join(tmpdir(), name), {recursive: true, force: true}); break }
+          catch (error) { if (error.code !== 'ENOTEMPTY' || attempt > 100) throw error }
     for (const [name, callback] of callbacks) if (name === 'tool.execute.after') await callback(event);
   }
   await new Promise(resolve => setTimeout(resolve, options.settle ?? 0));
@@ -825,8 +829,10 @@ def _end_host(tmp_path: Path, runtime: str, plugin: Path, ending: str, env: dict
     spool.mkdir(exist_ok=True)
     script = tmp_path / "ending-host.mjs"
     script.write_text(_ENDING_HOST)
-    subprocess.run([runtime, str(script), str(plugin), ending, json.dumps(options)],
-                   env={**os.environ, **env, "TMPDIR": str(spool)}, capture_output=True, timeout=30)
+    result = subprocess.run([runtime, str(script), str(plugin), ending, json.dumps(options)],
+                            env={**os.environ, **env, "TMPDIR": str(spool)}, capture_output=True, text=True, timeout=30)
+    # The host ended as asked, not on an error of its own.
+    assert result.returncode == (0 if ending in ("exit", "worker") else -getattr(signal, ending)), result.stderr
     return spool
 
 
@@ -891,6 +897,37 @@ def test_both_plugins_spool_rows_with_the_same_shell_programs():
     for name in ("CLAIM", "DRAIN"):
         assert isinstance(standard[name], str) and standard[name]
         subprocess.run(["bash", "-n", "-c", standard[name]], check=True)
+
+
+def _spool_programs() -> dict:
+    result = subprocess.run(["node", "--input-type=module", "-e", _SPOOL_PROGRAMS, str(STANDARD)],
+                            capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(result.stdout)[str(STANDARD)]
+
+
+@pytest.mark.parametrize("case", ["written", "claimed_elsewhere", "folder_gone", "file_gone_after_the_claim"])
+def test_a_logger_claims_its_row_once_and_reports_a_row_it_cannot_read(tmp_path, case):
+    """A row another writer claimed is left to it; a row whose file is gone is reported, so it is spooled again."""
+    programs = _spool_programs()
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    row = spool / "000000000001.json"
+    row.write_text('{"tool_name": "Bash"}')
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"cat > {shlex.quote(str(tmp_path / 'read'))}\nexit 3\n")
+    if case == "claimed_elsewhere":
+        (spool / "000000000001.json.claim").write_text("1")
+    elif case == "folder_gone":
+        shutil.rmtree(spool)
+    elif case == "file_gone_after_the_claim":
+        row.unlink()
+    result = subprocess.run(["bash", "-c", programs["CLAIM"], "vigil-activity", "bash", str(row), str(hook)],
+                            capture_output=True, text=True, timeout=30)
+    expected = {"written": 3, "claimed_elsewhere": 0}.get(case, programs["UNSPOOLED"])
+    assert (result.returncode, result.stderr) == (expected, "")
+    assert (tmp_path / "read").exists() == (case == "written")
+    if case == "written":
+        assert (tmp_path / "read").read_text() == '{"tool_name": "Bash"}'
 
 
 def _claiming_logger(agent: Path, claims: Path, body: str = "sleep 0.3") -> Path:
