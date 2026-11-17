@@ -135,6 +135,35 @@ def resolve_runtime_state_dir(install_root: Path) -> Path:
     return workspace_path(install_root, "runtime_state")
 
 
+def _resolve_runtime_data_dir(install_root: Path) -> Path:
+    """Resolve the runtime container's host-side ``/data`` mount dir.
+
+    Precedence: ``VIGIL_RUNTIME_DATA_DIR`` (or legacy ``KALI_MCP_DATA_DIR``) from the
+    process environment, then the same keys from the install-root ``.env`` — the file
+    ``vigil runtime start`` hands to ``docker --env-file``, so a value set there is
+    honoured host-side too rather than silently only inside the container — else
+    the workspace's ``runtime_state`` (``state/runtime`` on a fresh workspace,
+    ``.runtime-data`` on an adopted one). A relative value resolves against
+    ``install_root``.
+    Deliberately distinct from the orchestrator DB dir's ``VIGIL_DATA_DIR``
+    (``paths.resolve_orchestrator_data_dir``): separate directories with separate
+    defaults, so one env var must not relocate both. ``start_runtime`` and
+    ``runtime_mounts_ok`` must resolve this identically or a running container's mount
+    check will spuriously fail after an upgrade.
+    """
+    dotenv = read_env_file(install_root / ".env")
+    value = (
+        os.environ.get("VIGIL_RUNTIME_DATA_DIR")
+        or os.environ.get("KALI_MCP_DATA_DIR")
+        or dotenv.get("VIGIL_RUNTIME_DATA_DIR")
+        or dotenv.get("KALI_MCP_DATA_DIR")
+    )
+    if not value:
+        return resolve_runtime_state_dir(install_root)
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else install_root / path
+
+
 def resolve_logs_dir(install_root: Path) -> Path:
     from .workspace import workspace_path
 

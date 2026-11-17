@@ -6,8 +6,6 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
-
 
 LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -27,6 +25,8 @@ def read_strict_object(
     label: str,
     required_fields: frozenset[str],
 ) -> dict[str, object]:
+    from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
+
     if source == "-":
         stream = getattr(sys.stdin, "buffer", sys.stdin)
         raw = stream.read(MAX_JSON_ARTIFACT_BYTES + 1)

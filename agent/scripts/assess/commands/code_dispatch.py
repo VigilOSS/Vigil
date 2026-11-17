@@ -12,10 +12,11 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import urlencode
 
-import psutil
+if TYPE_CHECKING:
+    import psutil
 
 from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import (
@@ -25,7 +26,7 @@ from assess.lib.client import (
     AssessTransportError,
 )
 from assess.lib.config import load_config, resolve_input_path
-from assess.lib.contracts import CODE_SKIP_REASONS
+from assess.lib.skip_reasons import CODE_SKIP_REASONS
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.code_structural_identity import parse_code_file_page
 from assess.lib.vocabulary import vocabulary_key
@@ -2017,6 +2018,8 @@ _KEEPALIVE_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", 
 
 
 def _process_label(process: psutil.Process) -> str:
+    import psutil
+
     try:
         return process.name()
     except (psutil.Error, OSError):
@@ -2032,6 +2035,8 @@ def _keepalive_owner(explicit_pid: int | None) -> _KeepaliveOwner | None:
     which is the client when that shell is still running; a backgrounded
     command whose shell already exited has no derivable owner.
     """
+    import psutil
+
     if explicit_pid is not None:
         try:
             process = psutil.Process(explicit_pid)
@@ -2068,6 +2073,8 @@ def _keepalive_owner(explicit_pid: int | None) -> _KeepaliveOwner | None:
 
 def _owner_alive(owner: _KeepaliveOwner) -> bool:
     """Whether the owner still runs: the same pid with the same start time."""
+    import psutil
+
     try:
         process = psutil.Process(owner.pid)
         return (

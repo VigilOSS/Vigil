@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import shutil
 import socket
 import sys
@@ -28,9 +27,8 @@ from .paths import (
     container_host_url,
     default_runtime_container,
     engagements_root,
-    read_env_file,
+    _resolve_runtime_data_dir,
     resolve_orchestrator_base_url,
-    resolve_runtime_state_dir,
 )
 from .scope_entries import classify_scope_entry
 from .service_locks import service_start_lock
@@ -122,35 +120,6 @@ def provision_nuclei_templates(
         file=sys.stderr,
     )
     return "unknown"
-
-
-def _resolve_runtime_data_dir(install_root: Path) -> Path:
-    """Resolve the runtime container's host-side ``/data`` mount dir.
-
-    Precedence: ``VIGIL_RUNTIME_DATA_DIR`` (or legacy ``KALI_MCP_DATA_DIR``) from the
-    process environment, then the same keys from the install-root ``.env`` — the file
-    ``vigil runtime start`` hands to ``docker --env-file``, so a value set there is
-    honoured host-side too rather than silently only inside the container — else
-    the workspace's ``runtime_state`` (``state/runtime`` on a fresh workspace,
-    ``.runtime-data`` on an adopted one). A relative value resolves against
-    ``install_root``.
-    Deliberately distinct from the orchestrator DB dir's ``VIGIL_DATA_DIR``
-    (``paths.resolve_orchestrator_data_dir``): separate directories with separate
-    defaults, so one env var must not relocate both. ``start_runtime`` and
-    ``runtime_mounts_ok`` must resolve this identically or a running container's mount
-    check will spuriously fail after an upgrade.
-    """
-    dotenv = read_env_file(install_root / ".env")
-    value = (
-        os.environ.get("VIGIL_RUNTIME_DATA_DIR")
-        or os.environ.get("KALI_MCP_DATA_DIR")
-        or dotenv.get("VIGIL_RUNTIME_DATA_DIR")
-        or dotenv.get("KALI_MCP_DATA_DIR")
-    )
-    if not value:
-        return resolve_runtime_state_dir(install_root)
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else install_root / path
 
 
 def _subfinder_provider_config_script() -> str:

@@ -21,7 +21,7 @@ from assess.lib.client import (
 )
 from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
 from assess.lib.config import input_path, load_config
-from assess.lib.contracts import CODE_SKIP_REASONS
+from assess.lib.skip_reasons import CODE_SKIP_REASONS
 from assess.lib.schema_validation import load_schema
 
 _CODE_FILE_LOOKUP_PAGE_SIZE = 10000

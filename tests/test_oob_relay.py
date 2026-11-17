@@ -2156,7 +2156,7 @@ def test_doctor_metadata_row_names_allocation_or_pinning_but_never_both(
 
 # --- the record lives with the runtime container's `/data/oob` ----------------
 # `vigil oob start` writes the container's `/data/oob`, whose host side is the
-# runtime data directory (`runtime._resolve_runtime_data_dir`): the workspace's
+# runtime data directory (`paths._resolve_runtime_data_dir`): the workspace's
 # `state/runtime` on a fresh workspace, `.runtime-data` on an adopted one, or
 # `VIGIL_RUNTIME_DATA_DIR`. The routing record has to sit in the same place.
 

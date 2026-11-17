@@ -1,127 +1,177 @@
 from __future__ import annotations
 
 import argparse
-import difflib
-import ipaddress
-import importlib.metadata
 import json
 import os
 import shlex
 import subprocess
 import sys
-import tarfile
 import time
-import webbrowser
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, NoReturn, TextIO
+from typing import TYPE_CHECKING, Any, NoReturn, TextIO
 
-from . import auth as auth_module
-from . import backup as backup_module
-from . import blue as blue_module
 from . import config as config_module
-from . import email as email_module
-from . import restart_manifest
-from . import remediation as remediation_module
-from . import term
 from .argv import passthrough_boundary
-from .prompts import (
-    prompt_choice as _prompt_choice,
-    read_line as _read_line,
-    terminal_question as _terminal_question,
-    uses_prompt_ui as _uses_prompt_ui,
-)
-from .docker import run_command as docker_run_command
-from .engagements import (
-    BackendInstallRootStatus,
-    PROGRAM_HEADER_PRESETS,
-    CreateEngagementOptions,
-    CreatedEngagement,
-    _engagement_modes,
-    _verify_backend_install_root,
-    add_engagement_hosts,
-    add_engagement_track,
-    add_out_of_scope,
-    clear_active_engagement,
-    create_engagement,
-    current_engagement_path,
-    engagement_mode_state,
-    export_pdf,
-    list_engagements,
-    mutate_scope_file,
-    plan_engagement,
-    prepare_engagement_mode,
-    print_shell_cd_init,
-    remediation_repository,
-    remove_out_of_scope,
-    repair_engagement_tracks,
-    resolve_current_engagement,
-    resolve_engagement_path,
-    resolve_engagement_mode,
-    resolve_out_of_scope,
-    resolve_rate_limit,
-    resolve_required_headers,
-    set_active_engagement,
-    set_engagement_header,
-    set_engagement_rate_limit,
-    start_engagement,
-    unset_engagement_header,
-)
-from .install import InstallOptions, InstallResult, install_from_source
-from .mitmproxy import (
-    MitmproxyOptions,
-    build_image as build_proxy_image,
-    proxy_status_payload,
-    read_proxy_routes,
-    request_proxy_reload,
-    start_proxy,
-    stop_proxy,
-)
-from .oob import (
-    MAX_OOB_POLL_RECORDS,
-    OOB_ROOT,
-    OobOptions,
-    callback_urls,
-    clean_oob_clients,
-    client_payload_host,
-    interactions_for_domain,
-    is_self_test_interaction,
-    list_oob_clients,
-    list_running_oob_clients,
-    match_interactions_to_nonces,
-    mint_nonce,
-    oob_options as _oob_options,
-    oob_status,
-    parse_interactsh_log,
-    poll_client_payload_host,
-    read_client_log,
-    sanitize_name,
-    start_oob,
-    start_oob_client,
-    stop_oob,
-    stop_oob_client,
-    test_oob,
-    verify_oob_channel_cached,
-)
-from .oob_relay import legacy_relay_route, render_edge_routing
-from .orchestrator import (
-    OrchestratorOptions,
-    backend_ui_url,
-    build_frontend,
-    lifecycle_endpoint,
-    orchestrator_status_payload,
-    restart_orchestrator,
-    start_orchestrator,
-    stop_orchestrator,
-    warn_if_clients_resolve_elsewhere,
-)
 from .paths import agent_root, default_runtime_container, engagements_root, resolve_install_root, resolve_source_root, resolve_logs_dir, resolve_runtime_state_dir, resolve_orchestrator_data_dir
-from .preflight import _preflight_engagement_start
-from .host_tools import print_host_tool_setup, setup_host_tools
-from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
-from .status import collect_doctor_checks, collect_status, print_doctor, print_status
-from .up import UpOptions, run_up
+
+
+def _top_level_command_index(raw_argv: list[str]) -> int | None:
+    i = 0
+    while i < len(raw_argv):
+        token = raw_argv[i]
+        resolved = _global_value_option(token)
+        if resolved is not None:
+            _name, inline_value = resolved
+            i += 1 if inline_value else 2
+            continue
+        return i
+    return None
+
+
+def _global_value_option(token: str) -> tuple[str, bool] | None:
+    """Resolve argparse-compatible abbreviations of global value options."""
+
+    option, separator, _value = token.partition("=")
+    if not option.startswith("--") or len(option) <= 2:
+        return None
+    matches = [name for name in ("--root", "--source") if name.startswith(option)]
+    if len(matches) != 1:
+        return None
+    return matches[0], bool(separator)
+
+
+_VERSION_REQUESTS = (["--version"], ["-V"])
+
+
+def _loads_operator_commands(process_argv: list[str]) -> bool:
+    """Whether this process may run an operator command and so imports them.
+
+    Agents and hooks run `vigil assess` many times a minute; it only execs the
+    assessment CLI, and a bare `vigil --version` only prints the release. When
+    the `vigil` command itself (its console script, or the helper launcher's
+    ``python -c``) starts for one of those, the operator command implementations
+    are left unimported. Every other importer loads them.
+    """
+    if not process_argv or os.path.basename(process_argv[0]) not in {"vigil", "-c"}:
+        return True
+    argv = process_argv[1:]
+    index = _top_level_command_index(argv)
+    return not (argv in _VERSION_REQUESTS or (index is not None and argv[index] == "assess"))
+
+
+if TYPE_CHECKING or _loads_operator_commands(sys.argv):
+    import difflib
+    import ipaddress
+    import tarfile
+    import webbrowser
+
+    from . import auth as auth_module
+    from . import backup as backup_module
+    from . import blue as blue_module
+    from . import email as email_module
+    from . import restart_manifest
+    from . import remediation as remediation_module
+    from . import term
+    from .prompts import (
+        prompt_choice as _prompt_choice,
+        read_line as _read_line,
+        terminal_question as _terminal_question,
+        uses_prompt_ui as _uses_prompt_ui,
+    )
+    from .docker import run_command as docker_run_command
+    from .engagements import (
+        BackendInstallRootStatus,
+        PROGRAM_HEADER_PRESETS,
+        CreateEngagementOptions,
+        CreatedEngagement,
+        _engagement_modes,
+        _verify_backend_install_root,
+        add_engagement_hosts,
+        add_engagement_track,
+        add_out_of_scope,
+        clear_active_engagement,
+        create_engagement,
+        current_engagement_path,
+        engagement_mode_state,
+        export_pdf,
+        list_engagements,
+        mutate_scope_file,
+        plan_engagement,
+        prepare_engagement_mode,
+        print_shell_cd_init,
+        remediation_repository,
+        remove_out_of_scope,
+        repair_engagement_tracks,
+        resolve_current_engagement,
+        resolve_engagement_path,
+        resolve_engagement_mode,
+        resolve_out_of_scope,
+        resolve_rate_limit,
+        resolve_required_headers,
+        set_active_engagement,
+        set_engagement_header,
+        set_engagement_rate_limit,
+        start_engagement,
+        unset_engagement_header,
+    )
+    from .install import InstallOptions, InstallResult, install_from_source
+    from .mitmproxy import (
+        MitmproxyOptions,
+        build_image as build_proxy_image,
+        proxy_status_payload,
+        read_proxy_routes,
+        request_proxy_reload,
+        start_proxy,
+        stop_proxy,
+    )
+    from .oob import (
+        MAX_OOB_POLL_RECORDS,
+        OOB_ROOT,
+        OobOptions,
+        callback_urls,
+        clean_oob_clients,
+        client_payload_host,
+        interactions_for_domain,
+        is_self_test_interaction,
+        list_oob_clients,
+        list_running_oob_clients,
+        match_interactions_to_nonces,
+        mint_nonce,
+        oob_status,
+        parse_interactsh_log,
+        poll_client_payload_host,
+        read_client_log,
+        sanitize_name,
+        start_oob,
+        start_oob_client,
+        stop_oob,
+        stop_oob_client,
+        test_oob,
+        verify_oob_channel_cached,
+    )
+    from .oob_relay import legacy_relay_route, render_edge_routing
+    from .orchestrator import (
+        OrchestratorOptions,
+        backend_ui_url,
+        build_frontend,
+        lifecycle_endpoint,
+        orchestrator_status_payload,
+        restart_orchestrator,
+        start_orchestrator,
+        stop_orchestrator,
+        warn_if_clients_resolve_elsewhere,
+    )
+    from .preflight import _preflight_engagement_start
+    from .host_tools import print_host_tool_setup, setup_host_tools
+    from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
+    from .status import collect_doctor_checks, collect_status, print_doctor, print_status
+    from .up import UpOptions, run_up
+
+    _OPERATOR_COMMANDS_LOADED = True
+else:
+    _OPERATOR_COMMANDS_LOADED = False
 
 
 _CREATE_ENGAGEMENT_TYPES = ["web", "code", "android", "remediation"]
@@ -346,9 +396,12 @@ def _cli_version() -> str:
     exception here is built at parser-construction time and would break every
     invocation, not just `--version`.
     """
-    from . import __version__
     if Path(__file__).resolve().parent.parent.name == "cli":
+        from . import __version__
+
         return __version__
+    import importlib.metadata
+
     try:
         return importlib.metadata.version("vigil")
     except importlib.metadata.PackageNotFoundError:
@@ -383,6 +436,22 @@ def main(argv: list[str] | None = None) -> None:
         _main(raw)
 
 
+def _root_parser() -> argparse.ArgumentParser:
+    """The `vigil` root parser and its global options, before any command is added."""
+    parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
+    parser.add_argument("--root", help="Private workspace (default: $VIGIL_INSTALL_DIR or ~/vigil)")
+    parser.add_argument("--source", help="Application directory for install/up/assess (development); never fetches source")
+    # Report the matched application version, including a retained CLI snapshot.
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version=f"vigil {_cli_version()}",
+        help="Print the installed CLI version and exit",
+    )
+    return parser
+
+
 def _engagement_selector(parser: argparse.ArgumentParser, *, dest: str = "key") -> None:
     """The optional engagement positional and its picker, in their usage order."""
     parser.add_argument(dest, nargs="?")
@@ -395,17 +464,14 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     if command_idx is not None and raw_argv[command_idx] == "assess":
         _exec_assess_passthrough(raw_argv, command_idx)
         return
-    parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
-    parser.add_argument("--root", help="Private workspace (default: $VIGIL_INSTALL_DIR or ~/vigil)")
-    parser.add_argument("--source", help="Application directory for install/up/assess (development); never fetches source")
-    # Report the matched application version, including a retained CLI snapshot.
-    parser.add_argument(
-        "--version",
-        "-V",
-        action="version",
-        version=f"vigil {_cli_version()}",
-        help="Print the installed CLI version and exit",
-    )
+    parser = _root_parser()
+    if raw_argv in _VERSION_REQUESTS:
+        parser.parse_args(raw_argv)  # prints the version and exits before any command is built
+    if not _OPERATOR_COMMANDS_LOADED:
+        raise RuntimeError(
+            f"vigil_cli.main was loaded for `{shlex.join(['vigil', *sys.argv[1:]])}` "
+            "without its operator commands and cannot run another command in this process"
+        )
     sub = parser.add_subparsers(
         dest="command", required=True, parser_class=_SiblingHintParser
     )
@@ -1547,31 +1613,6 @@ def _hoist_engagement_start_root(raw_argv: list[str]) -> list[str]:
     return [*hoisted, *rest]
 
 
-def _top_level_command_index(raw_argv: list[str]) -> int | None:
-    i = 0
-    while i < len(raw_argv):
-        token = raw_argv[i]
-        resolved = _global_value_option(token)
-        if resolved is not None:
-            _name, inline_value = resolved
-            i += 1 if inline_value else 2
-            continue
-        return i
-    return None
-
-
-def _global_value_option(token: str) -> tuple[str, bool] | None:
-    """Resolve argparse-compatible abbreviations of global value options."""
-
-    option, separator, _value = token.partition("=")
-    if not option.startswith("--") or len(option) <= 2:
-        return None
-    matches = [name for name in ("--root", "--source") if name.startswith(option)]
-    if len(matches) != 1:
-        return None
-    return matches[0], bool(separator)
-
-
 # A forwarded token this close to one of `engagement start`'s own long options is a
 # typo, not a client flag. Real client flags sit far below it (`--thinking-budget` vs
 # `--thinking` scores 0.74; `--slect` vs `--select` scores 0.93), so the cutoff
@@ -1697,6 +1738,13 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
         [str(assess), *assess_args],
         _assess_exec_environment(install_root, application_root=source_root),
     )
+
+
+def _oob_options(install_root: Path) -> OobOptions:
+    """The workspace's OOB options, importing the OOB module only when they are read."""
+    from .oob import oob_options
+
+    return oob_options(install_root)
 
 
 def _assess_exec_environment(install_root: Path, *, application_root: Path | None = None) -> dict[str, str]:

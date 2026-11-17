@@ -330,9 +330,12 @@ digests stamped on consumers — see `src/vigil_cli/image_freshness.py`. `worksp
 initialization provenance; it is not the release identity of an already-running process.
 
 `application.py` validates the exact bundle inventory and materializes immutable version/digest
-cache paths. Do not delete retained releases on upgrade: backend processes and client helpers may
-still use them. Official client starts serialize shared-file repair and PID/birth-identity receipts
-through `client_sessions.py`; concurrent shared-config starts reuse the live release without repair.
+cache paths. After validation it compiles the release's `cli` and `agent/scripts` once per
+interpreter to checked-hash bytecode in `__pycache__`, which validation ignores, in a detached
+background process that retries a failed compile after ten minutes. Do not delete retained
+releases on upgrade: backend processes and client helpers may still use them. Official client
+starts serialize shared-file repair and PID/birth-identity receipts through `client_sessions.py`;
+concurrent shared-config starts reuse the live release without repair.
 Native project contexts stay independent. Track routing changes retain the live shared release under
 the same lock. Explicit global client maintenance keeps its cross-release guard. Routine adoption
 does not refresh client files. Restart requirements belong to `restart_manifest.consumer_states`.

@@ -25,6 +25,7 @@ from .kali_audit import ALLOWED_PHASES as ALLOWED_PHASES, _enum_reject_message
 from .kali_output import KALI_EXIT_CODES as KALI_EXIT_CODES
 from .phases import canonical_phase
 from .schema_validation import load_schema
+from .skip_reasons import CODE_SKIP_REASONS as CODE_SKIP_REASONS
 from .surfaces import (
     CREATABLE_STATUSES as CREATABLE_STATUSES,
     VALID_SURFACE_TYPES as VALID_SURFACE_TYPES,
@@ -41,7 +42,6 @@ from .contract_registry import (
     CATALOG_PHASES as CATALOG_PHASES,
     COMMAND_GOALS as COMMAND_GOALS,
     CODE_REPO_ROLES as CODE_REPO_ROLES,
-    CODE_SKIP_REASONS as CODE_SKIP_REASONS,
     CommandContract,
     ContractVariant,
     GATED_DECISION_KINDS as GATED_DECISION_KINDS,

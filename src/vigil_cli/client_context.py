@@ -9,7 +9,6 @@ import re
 import sys
 
 from .assessment_clients import CONTEXT_FILE
-from .client_checks import _manifest_check, _object, _read_regular, read_project_context, validate_context_binding
 from .paths import engagements_root
 
 
@@ -38,6 +37,10 @@ def project_identity(*, install_root: str | None = None, inspection_only: bool =
     if context is None:
         yield
         return
+    # Verification is needed only inside a client project, so outside one (every
+    # hook and helper of a terminal-launched client) it is not imported.
+    from .client_checks import _manifest_check, _object, _read_regular, read_project_context, validate_context_binding
+
     try:
         stable = discovered is not None and discovered.name == ".vigil-client-project.json"
         if stable:

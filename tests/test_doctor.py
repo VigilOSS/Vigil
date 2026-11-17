@@ -255,7 +255,7 @@ def test_version_flag_reports_the_installed_cli_version(
     A newer CLI against a stale working root leaves features silently inert, so
     reconciling the two layers starts with knowing which CLI is installed.
     """
-    monkeypatch.setattr(main_module.importlib.metadata, "version", lambda name: "9.8.7")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "9.8.7")
 
     with pytest.raises(SystemExit) as excinfo:
         main_module.main(["--version"])
@@ -277,7 +277,7 @@ def test_version_resolution_survives_a_missing_distribution(
     def no_metadata(_name: str) -> str:
         raise importlib.metadata.PackageNotFoundError("vigil")
 
-    monkeypatch.setattr(main_module.importlib.metadata, "version", no_metadata)
+    monkeypatch.setattr(importlib.metadata, "version", no_metadata)
 
     assert "unknown" in main_module._cli_version()
 

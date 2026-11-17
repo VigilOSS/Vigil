@@ -17,7 +17,7 @@ from _fake_client import StubClient
 
 from assess import cli
 from assess.commands import agent, artifact
-from assess.lib import contracts
+from assess.lib import contracts, skip_reasons
 from assess.lib.code_structural_identity import STRUCTURAL_INDEX_SCHEMA
 from assess.lib.tenant_references import (
     TenantReferenceError,
@@ -1512,7 +1512,7 @@ def test_code_record_classify_examples_validate_against_their_schema() -> None:
         if example.get("classification") == "skip"
     ]
     assert skips, "no example demonstrates the reason a skip now requires"
-    assert skips[0]["skip_reason"] in contracts.CODE_SKIP_REASONS
+    assert skips[0]["skip_reason"] in skip_reasons.CODE_SKIP_REASONS
 
 
 def test_the_classify_schema_skip_reason_vocabulary_matches_the_mirror() -> None:
@@ -1527,7 +1527,7 @@ def test_the_classify_schema_skip_reason_vocabulary_matches_the_mirror() -> None
         "the generated schema must carry the skip vocabulary: the agent reads "
         "this file as the classify contract, and code_classify prefers it"
     )
-    assert tuple(declared["enum"]) == contracts.CODE_SKIP_REASONS
+    assert tuple(declared["enum"]) == skip_reasons.CODE_SKIP_REASONS
 
 
 # --------------------------------------------------------------------------- #
@@ -2032,7 +2032,7 @@ def _cited_pins() -> list[tuple[str, str, str]]:
     import ast
 
     cited: list[tuple[str, str, str]] = []
-    for module in (contracts, contract_registry_module()):
+    for module in (contracts, contract_registry_module(), skip_reasons):
         source = Path(module.__file__).read_text(encoding="utf-8")
         lines = source.splitlines()
         tree = ast.parse(source)

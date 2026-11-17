@@ -8,7 +8,10 @@ import hashlib
 import re
 import shlex
 import stat
+import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
 from .install_fs import atomic_write_bytes, open_child_directory, open_pinned_directory
@@ -40,6 +43,67 @@ def _read_file(root_fd: int, relative: str) -> bytes:
         os.close(descriptor)
 
 
+def _bundle_inventory(root: Path) -> set[str]:
+    """Every regular file under ``root`` as a relative POSIX name, refusing links and devices."""
+    actual: set[str] = set()
+    pending = [""]
+    while pending:
+        prefix = pending.pop()
+        with os.scandir(root / prefix if prefix else root) as entries:
+            for entry in entries:
+                relative = prefix + entry.name
+                if entry.is_symlink():
+                    raise ValueError(f"Symbolic link in application bundle: {root / relative}")
+                directory = entry.is_dir()
+                if directory:
+                    pending.append(relative + "/")
+                # pip compiles package data at install time, and importing helpers
+                # from a materialized cache writes bytecode beside them, through
+                # temporary names while a concurrent import is mid-write. Python
+                # regenerates it from the verified sources; it is never copied.
+                if "__pycache__" in relative.split("/"):
+                    continue
+                if entry.is_file():
+                    actual.add(relative)
+                elif not directory:
+                    raise ValueError(f"Invalid application bundle entry: {root / relative}")
+    return actual
+
+
+def _read_bundle_file(chain: list[tuple[str, int]], relative: str) -> tuple[bytes, int]:
+    """``_read_file`` and the file's permission bits, reusing open ancestor directories.
+
+    ``chain`` holds the no-follow descriptors of the previous file's ancestor
+    directories, outermost first, starting from ``[("", root_fd)]``. Only the
+    ancestors ``relative`` shares stay open, so a walk holds one descriptor per
+    path level however many directories a release has, and a sorted inventory
+    opens each directory once. The caller closes every descriptor after the first.
+    """
+    parts = relative.split("/")
+    parents, leaf = parts[:-1], parts[-1]
+    shared = 1
+    while shared < len(chain) and shared <= len(parents) and chain[shared][0] == parents[shared - 1]:
+        shared += 1
+    while len(chain) > shared:
+        os.close(chain.pop()[1])
+    for part in parents[shared - 1:]:
+        chain.append((part, open_child_directory(chain[-1][1], part, Path(relative))))
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    source = os.open(leaf, flags, dir_fd=chain[-1][1])
+    try:
+        before = os.fstat(source)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"Invalid application bundle file: {relative}")
+        with os.fdopen(os.dup(source), "rb") as stream:
+            payload = stream.read()
+        after = os.fstat(source)
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise ValueError(f"Application bundle changed while reading: {relative}")
+        return payload, stat.S_IMODE(after.st_mode)
+    finally:
+        os.close(source)
+
+
 def validate_bundle(root: Path, *, materialized: bool = False, launcher_root: Path | None = None) -> dict[str, object]:
     """Validate paths, exact inventory and content before using a packaged release."""
     pin = open_pinned_directory(root)
@@ -69,29 +133,20 @@ def validate_bundle(root: Path, *, materialized: bool = False, launcher_root: Pa
             expected = hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             if metadata.get("content_sha256") != expected:
                 raise ValueError("Invalid application bundle content digest")
-            actual: set[str] = set()
-            for entry in root.rglob("*"):
-                relative = entry.relative_to(root)
-                if entry.is_symlink():
-                    raise ValueError(f"Symbolic link in application bundle: {entry}")
-                # pip compiles package data at install time, and importing helpers
-                # from a materialized cache writes bytecode beside them, through
-                # temporary names while a concurrent import is mid-write. Python
-                # regenerates it from the verified sources; it is never copied.
-                if "__pycache__" in relative.parts:
-                    continue
-                if entry.is_file():
-                    actual.add(entry.relative_to(root).as_posix())
-                elif not entry.is_dir():
-                    raise ValueError(f"Invalid application bundle entry: {entry}")
             allowed = set(files) | {"bundle.json"} | ({"bin/vigil"} if materialized else set())
-            if actual != allowed:
+            if _bundle_inventory(root) != allowed:
                 raise ValueError("Application bundle contains missing or unlisted files")
-            for name, digest in files.items():
-                if hashlib.sha256(_read_file(pin.fd, name)).hexdigest() != digest:
-                    raise ValueError(f"Application bundle content mismatch: {name}")
-                if materialized and stat.S_IMODE((root / name).stat().st_mode) != (0o755 if name in executables else 0o644):
-                    raise ValueError(f"Application bundle mode mismatch: {name}")
+            chain = [("", pin.fd)]
+            try:
+                for name, digest in files.items():
+                    payload, mode = _read_bundle_file(chain, name)
+                    if hashlib.sha256(payload).hexdigest() != digest:
+                        raise ValueError(f"Application bundle content mismatch: {name}")
+                    if materialized and mode != (0o755 if name in executables else 0o644):
+                        raise ValueError(f"Application bundle mode mismatch: {name}")
+            finally:
+                for _, descriptor in chain[1:]:
+                    os.close(descriptor)
             if materialized:
                 if _read_file(pin.fd, "bin/vigil") != _launcher(launcher_root or root):
                     raise ValueError("Application helper launcher content mismatch")
@@ -199,6 +254,106 @@ def materialize_bundle(bundle: Path) -> Path:
     return root
 
 
+# The helper sources of a release, compiled for the interpreter that validated it.
+_RELEASE_BYTECODE_TREES = ("cli", "agent/scripts")
+# A compile holds its lock until it succeeds. One that failed, or has not finished
+# after this long, is retried by the next helper after the lock's last change.
+_RELEASE_BYTECODE_LOCK_SECONDS = 600
+_COMPILE_RELEASE_BYTECODE = """
+import importlib.util, os, py_compile, sys
+root, marker, lock, *trees = sys.argv[1:]
+failures = []
+
+def current(source, cfile):
+    try:
+        with open(cfile, "rb") as stream:
+            header = stream.read(16)
+    except OSError:
+        return False
+    return header == importlib.util.MAGIC_NUMBER + (0b11).to_bytes(4, "little") + importlib.util.source_hash(source)
+
+ok = False
+try:
+    for tree in trees:
+        top = os.path.join(root, tree)
+        if not os.path.isdir(top):
+            continue
+        for directory, children, names in os.walk(top, onerror=failures.append):
+            children[:] = sorted(child for child in children if child != "__pycache__")
+            for name in sorted(names):
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(directory, name)
+                try:
+                    with open(path, "rb") as stream:
+                        source = stream.read()
+                    cfile = importlib.util.cache_from_source(path)
+                    if not current(source, cfile):
+                        py_compile.compile(path, cfile, doraise=True,
+                                           invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+                except (OSError, py_compile.PyCompileError) as exc:
+                    failures.append(exc)
+    if not failures:
+        try:
+            open(marker, "x").close()
+        except FileExistsError:
+            pass
+        ok = True
+finally:
+    if ok:
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
+    else:
+        with open(lock, "w") as stream:
+            stream.write("failed\\n")
+"""
+# Starts the compile and returns at once, so the compile is never a child of the
+# helper, which may run for a whole lane and would otherwise have to reap it.
+_DETACH = '"$@" &'
+
+
+def _compile_release_bytecode(root: Path) -> None:
+    """Compile a validated release's helper sources once per interpreter, in the background.
+
+    Helpers run with PYTHONDONTWRITEBYTECODE, so an import never writes bytecode and,
+    without this, every call recompiles every module it imports. The bytecode is
+    CHECKED-HASH: an import uses a cached file only while the source bytes it was
+    compiled from are the bytes on disk, so nothing but the validated sources runs.
+    The compile rewrites any other bytecode beside those sources, keeps what already
+    matches, and runs isolated from the caller's Python environment and working
+    directory. It lands in ``__pycache__``, which `validate_bundle` ignores. Best
+    effort: a release the process cannot write keeps compiling from source, exactly
+    as before.
+    """
+    tag = sys.implementation.cache_tag
+    if tag is None:
+        return
+    cache = root / "__pycache__"
+    marker = cache / f"vigil-checked-hash.{tag}"
+    lock = cache / f"vigil-checked-hash.{tag}.lock"
+    if marker.exists():
+        return
+    try:
+        cache.mkdir(exist_ok=True)
+        try:
+            os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            if time.time() - lock.stat().st_mtime < _RELEASE_BYTECODE_LOCK_SECONDS:
+                return
+            os.truncate(lock, 0)
+            os.utime(lock)
+        subprocess.run(
+            ["/bin/sh", "-c", _DETACH, "vigil-compile", sys.executable, "-I", "-B", "-c", _COMPILE_RELEASE_BYTECODE,
+             str(root), str(marker), str(lock), *_RELEASE_BYTECODE_TREES],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True, check=False,
+        )
+    except OSError:
+        return
+
+
 def resolve_application_root(
     value: str | Path | None = None, *, preserve_path: bool = False
 ) -> Path:
@@ -209,16 +364,20 @@ def resolve_application_root(
             raise SystemExit(f"Invalid Vigil application directory: {path}")
         if (path / "bundle.json").exists():
             validate_bundle(path, materialized=True)
+            _compile_release_bytecode(path)
         return path if preserve_path else path.resolve()
     module = Path(__file__).resolve()
     bundle = module.parent / "_bundle"
     if bundle.is_dir():
-        return materialize_bundle(bundle)
+        root = materialize_bundle(bundle)
+        _compile_release_bytecode(root)
+        return root
     # Editable imports and retained release snapshots both have a known layout.
     root = module.parents[2]
     if (root / "agent").is_dir() and (root / "orchestrator").is_dir():
         if (root / "bundle.json").exists():
             validate_bundle(root, materialized=True)
+            _compile_release_bytecode(root)
         return root
     raise SystemExit("Cannot locate the matched Vigil application bundle. Reinstall the release wheel.")
 

@@ -668,7 +668,7 @@ def test_classify_refuses_a_skip_reason_outside_the_standard_set(
 
 
 def test_the_classify_skip_vocabulary_is_the_shared_mirror() -> None:
-    from assess.lib.contracts import CODE_SKIP_REASONS
+    from assess.lib.skip_reasons import CODE_SKIP_REASONS
 
     assert code_classify._VALID_SKIP_REASONS == frozenset(CODE_SKIP_REASONS)
 

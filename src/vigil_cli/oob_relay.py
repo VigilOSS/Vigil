@@ -139,9 +139,7 @@ def oob_state_dir(
     as an absolute path under that root, which is re-anchored at ``.`` so the
     install never reaches it again through a path that could have been swapped.
     """
-    # Imported here because `runtime` pulls in the Docker helpers that the rest
-    # of this filesystem-only module never needs.
-    from .runtime import _resolve_runtime_data_dir
+    from .paths import _resolve_runtime_data_dir
 
     root = install_root.expanduser()
     if not preserve_install_path:
