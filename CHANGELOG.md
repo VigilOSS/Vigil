@@ -5,6 +5,31 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.11.0] - 2026-11-17
+
+### Changed
+
+- Vigil supports OpenCode 2.3.0 or newer, before 3.0. Web/code and Blue starts, generated
+  `start_opencode.sh` launchers, and assessment and remediation client starts refuse an installed
+  version they can read outside that range before any other step; a pre-release counts as earlier than its
+  release. Launchers run `opencode --standalone`.
+- Vigil's OpenCode plugins record activity in the background, so a tool call no longer waits for
+  its row. Each row lands shortly after its call, is dated by when the call finished, and is
+  written exactly once, including rows still queued when OpenCode exits or is killed.
+- `vigil assess log` accepts `--occurred-at` for when the call finished and honours the root
+  `--engagement-dir`. An unusable `--occurred-at` is reported on stderr and the row is still
+  recorded at the time it was logged.
+- The Activity tab places a row recorded late at its own time, without repeats, and refreshes
+  faster on large engagements.
+- `vigil` and `vigil assess` helpers start faster from an installed release, and the activity
+  hook for Claude Code and Codex runs faster.
+
+### Fixed
+
+- The activity hook records commands and output that begin with `-`.
+- The activity API answers an `occurred_at` outside the representable range with a validation
+  error instead of a server error.
+
 ## [2.10.0] - 2026-11-16
 
 ### Changed
