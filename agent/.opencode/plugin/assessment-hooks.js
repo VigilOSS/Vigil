@@ -1,7 +1,8 @@
 // Native web/code adapter. The legacy standard plugin remains Blue-owned.
-import {execFile, execFileSync, spawn} from "node:child_process"
-import {readFileSync, realpathSync, writeFileSync, renameSync, existsSync, lstatSync, openSync, closeSync, unlinkSync, appendFileSync} from "node:fs"
+import {execFile, spawn} from "node:child_process"
+import {readFileSync, realpathSync, writeFileSync, renameSync, existsSync, lstatSync, openSync, closeSync, unlinkSync, appendFileSync, mkdtempSync} from "node:fs"
 import {join, dirname} from "node:path"
+import {tmpdir} from "node:os"
 import {createHash, randomUUID} from "node:crypto"
 import {promisify} from "node:util"
 
@@ -12,12 +13,14 @@ const BIND_ATTEMPTS = 3
 const ADOPTION_STALE_MINUTES = 10
 const LEASE_PAGE = 50
 const ACTIVITY_BACKLOG = 200
+// Hooks writing activity at once, across sessions.
+const ACTIVITY_LOGGERS = 4
 const FINAL_HANDOFF = new Set(["ready", "blocked"])
 const shellWord = value => /^[A-Za-z0-9_./:=@%+,-]+$/.test(String(value)) ? String(value)
   : `'${String(value).replace(/'/g, `'\\''`)}'`
 
-// Everything below is independent of the native host API; each major's adapter
-// supplies the native session, message and tool-catalog reads.
+// Everything below is independent of the native host API; the adapter
+// (VigilAssessmentHooksV2) supplies the native session, message and tool-catalog reads.
 const runtime = ({bindingPath, activityTimeoutMs}) => {
   const states = new Map()
   const readContext = () => {
@@ -41,9 +44,14 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
     VIGIL_CLIENT_NAME: "opencode", ORCHESTRATOR_BASE_URL: context.backend_url || process.env.ORCHESTRATOR_BASE_URL,
     PATH: [join(context.workspace, "bin"), ...Object.values(context.tools || {}).map(value => dirname(value)),
       process.env.PATH || "/usr/bin:/bin"].join(":")})
-  const hook = (context, name, payload) => execFileSync(context.tools?.bash || "bash",
-    [join(context.agent_root, "scripts/hooks", name)], {input: JSON.stringify({...payload, cwd: context.engagement_dir}),
-      env: env(context), encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024, stdio: ["pipe", "pipe", "pipe"]})
+  // A context hook's output joins the request; it runs off the event loop so other sessions keep working.
+  const hook = (context, name, payload) => new Promise((resolve, reject) => {
+    const child = execFile(context.tools?.bash || "bash", [join(context.agent_root, "scripts/hooks", name)],
+      {env: env(context), encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024},
+      (error, stdout) => error ? reject(error) : resolve(stdout))
+    child.stdin.on("error", () => {})
+    child.stdin.end(JSON.stringify({...payload, cwd: context.engagement_dir}))
+  })
   const statePath = (context, session) => join(context.workspace,
     ".vigil-health-" + createHash("sha256").update(String(session)).digest("hex") + ".json")
   const state = (context, session) => {
@@ -265,19 +273,104 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
     }
     return status ? `Vigil dispatch status: ${JSON.stringify(status)}` : null
   }
-  // Activity rows are written off the tool's path, one at a time, so a loaded
-  // host neither stalls the native event loop nor fans out shell hooks. The
-  // hook claims a call identity before it posts, so a write that timed out is
-  // never retried (the retry would no-op on that claim); only a spawn that never
-  // started is. An unconfirmed row is counted and kept beside the health receipts.
-  let activity = Promise.resolve()
+  // Activity rows are written off the tool's path. Each session's rows are written
+  // one at a time in call order, and sessions side by side, at most
+  // ACTIVITY_LOGGERS hooks at once, so a loaded host neither stalls the native
+  // event loop, falls behind one hook, nor fans out shell hooks. A row names its
+  // native call, which the hook claims before it posts, so a write that timed out
+  // is never retried (the retry would no-op on that claim); only a spawn that
+  // never started is. A row without that identity falls back to the hook's
+  // command-text duplicate window, so such rows never run together. An
+  // unconfirmed row is counted and kept beside the health receipts.
+  //
+  // A queued row is a private spool file from the moment it is queued, so no row
+  // depends on OpenCode running code as it ends: SIGHUP (which `opencode serve`
+  // without a terminal leaves to its default action), any other signal OpenCode
+  // does not handle, and SIGKILL end the process without an exit event. A hook
+  // claims its row as it starts, with an exclusive marker naming its pid, and
+  // reads the file itself, so a started hook has its whole input. One
+  // detached drainer per spool holds a pipe from this process, which closes however
+  // the process ends; the drainer then waits for the running hooks and writes every
+  // unclaimed row in call order. The claim lets exactly one of them write each row.
+  // Rows still queued when an exit event does fire are also kept as unconfirmed.
   let unconfirmed = 0
+  let sequence = 0
   const queued = new Set()
+  const lanes = new Map()
+  const ready = []
+  const running = new Map()
+  const spools = new Map()
   process.once("exit", () => {
-    for (const write of queued) keepUnconfirmed(write.context, write.payload, write.body,
-      new Error("OpenCode exited before the queued write was confirmed"))
+    const writes = [...queued].filter(write => !write.failed).sort((left, right) => left.sequence - right.sequence)
+    for (const write of writes) keepUnconfirmed(write.context, write.payload, write.body,
+      new Error("OpenCode exited before the queued write was confirmed; a detached hook still writes it"))
   })
-  const runHook = (context, name, body) => new Promise((resolve, reject) => {
+  const shell = context => context.tools?.bash || "bash"
+  const logHook = context => join(context.agent_root, "scripts/hooks/post-tool-log.sh")
+  // The same two shell programs, and UNSPOOLED, are in standard-hooks.js.
+  // CLAIM <bash> <row file> <hook>: runs the hook on the row unless it is already claimed;
+  // exits UNSPOOLED when the row's file is gone.
+  const UNSPOOLED = 75
+  const CLAIM = 'set -C; { printf %s "$$" > "$2.claim"; } 2>/dev/null || { [ -e "$2.claim" ] && exit 0; exit 75; }; '
+    + 'exec "$1" "$3" < "$2"'
+  // DRAIN <spool> <bash> <hook>: once this process ends, waits for each claimed row's
+  // hook (as long as a hook may run), then writes the unclaimed rows in order.
+  const DRAIN = 'w() { p=; read -r p < "$1"; [ -n "$p" ] || { sleep 0.05; read -r p < "$1"; }; n=0; '
+    + 'while [ -n "$p" ] && kill -0 "$p" 2>/dev/null && [ "$n" -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done; }; '
+    + 'while read -r line; do :; done; set -C; for c in "$1"/*.claim; do [ -e "$c" ] && w "$c"; done; '
+    + 'for f in "$1"/*.json; do [ -e "$f" ] || continue; if { printf %s "$$" > "$f.claim"; } 2>/dev/null; '
+    + 'then "$2" "$3" < "$f" >/dev/null 2>&1; else w "$f.claim"; fi; rm -f "$f" "$f.claim"; done; '
+    + 'rm -f "$1"/*; rmdir "$1"'
+  // The spool a context's rows are queued in, with a drainer answering for it. A spool
+  // whose directory is gone starts over: its drainer, which can no longer write
+  // anything, is let go, and the rows still queued in it are spooled again.
+  const spoolKey = context => [context.binding_sha256, shell(context), logHook(context)].join("\0")
+  const spoolFor = context => {
+    const key = spoolKey(context)
+    let spool = spools.get(key)
+    const lost = spool && !existsSync(spool.dir)
+    if (!spool || lost) {
+      try { spool?.drainer?.stdin.destroy() } catch {}
+      spool = {dir: mkdtempSync(join(tmpdir(), "vigil-activity-")), drainer: null}
+      spools.set(key, spool)
+    }
+    if (!spool.drainer) {
+      try {
+        const drainer = spawn(shell(context), ["-c", DRAIN, "vigil-activity", spool.dir, shell(context), logHook(context)],
+          {env: env(context), stdio: ["pipe", "ignore", "ignore"], detached: true})
+        spool.drainer = drainer
+        // A drainer that ends while OpenCode runs is replaced by the next row.
+        drainer.once("exit", () => { if (spool.drainer === drainer) spool.drainer = null })
+        drainer.once("error", () => { if (spool.drainer === drainer) spool.drainer = null })
+        drainer.stdin.on("error", () => {})
+        drainer.unref()
+        drainer.stdin.unref?.()
+      } catch (error) {
+        console.error(`[vigil] Native activity still queued when OpenCode ends may not be written: ${error.message}`)
+      }
+    }
+    if (lost) for (const item of [...lanes.values()].flat().sort((left, right) => left.sequence - right.sequence))
+      if (spoolKey(item.context) === key && item.file && !existsSync(item.file)) try { place(item) } catch {}
+    return spool
+  }
+  // A written (or abandoned) row leaves the spool.
+  const unspool = item => {
+    for (const path of [item.file, item.file + ".claim"]) try { unlinkSync(path) } catch {}
+  }
+  // Writes the row into its context's spool.
+  const place = item => {
+    item.file = join(spoolFor(item.context).dir, String(item.sequence).padStart(12, "0") + ".json")
+    writeFileSync(item.file, item.body, {mode: 0o600, flag: "wx"})
+  }
+  // The spooled row takes its final payload; a rename, so the file is never half written.
+  // A row whose file is gone is spooled again.
+  const respool = item => {
+    if (!existsSync(item.file)) return place(item)
+    const next = item.file + ".next"
+    writeFileSync(next, item.body, {mode: 0o600})
+    renameSync(next, item.file)
+  }
+  const runHook = item => new Promise((resolve, reject) => {
     let settled = false
     const settle = (error, started) => {
       if (settled) return
@@ -285,18 +378,17 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
       clearTimeout(timer)
       if (error) reject(Object.assign(error, {started})); else resolve()
     }
-    const child = spawn(context.tools?.bash || "bash", [join(context.agent_root, "scripts/hooks", name)],
-      {env: env(context), stdio: ["pipe", "ignore", "ignore"]})
+    const child = spawn(shell(item.context), ["-c", CLAIM, "vigil-activity", shell(item.context), item.file, logHook(item.context)],
+      {env: env(item.context), stdio: "ignore", detached: true})
     const timer = setTimeout(() => {
-      child.kill("SIGKILL")
-      settle(new Error(`${name} did not finish within ${activityTimeoutMs} ms`), true)
+      try { process.kill(-child.pid, "SIGKILL") } catch { child.kill("SIGKILL") }
+      settle(new Error(`post-tool-log.sh did not finish within ${activityTimeoutMs} ms`), true)
     }, activityTimeoutMs)
     child.once("spawn", () => { child.started = true })
     child.once("error", error => settle(error, Boolean(child.started)))
     child.once("exit", (code, signal) => settle(code === 0 ? null
-      : new Error(`${name} exited ${signal ? "on " + signal : code}`), true))
-    child.stdin.on("error", () => {})
-    child.stdin.end(body)
+      : code === UNSPOOLED && !existsSync(item.file) ? Object.assign(new Error("its spool file is gone"), {unspooled: true})
+      : new Error(`post-tool-log.sh exited ${signal ? "on " + signal : code}`), true))
   })
   const keepUnconfirmed = (context, payload, body, error) => {
     unconfirmed += 1
@@ -311,26 +403,91 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
       + `${payload.session_id} was not confirmed recorded: ${error.message}. ${unconfirmed} unconfirmed this session; `
       + `${kept}. Compare with \`vigil assess fetch activity-entries\`.`)
   }
-  const writeActivity = (context, payload) => {
-    // Serialized now: the write runs after the tool result has moved on.
-    const write = {context, payload, body: JSON.stringify({...payload, cwd: context.engagement_dir})}
-    if (queued.size >= ACTIVITY_BACKLOG)
-      return keepUnconfirmed(context, payload, write.body, new Error(`${ACTIVITY_BACKLOG} activity writes already queued`))
-    queued.add(write)
-    activity = activity.then(async () => {
-      try { await runHook(context, "post-tool-log.sh", write.body) } catch (error) {
-        if (error.started) throw error
-        await new Promise(resolve => setTimeout(resolve, 250))
-        await runHook(context, "post-tool-log.sh", write.body)
+  const write = async item => {
+    await item.ready
+    if (item.failed) return console.error(`[vigil] Native activity was not recorded: ${item.failed.message}`)
+    if (!existsSync(item.file)) place(item)
+    try { await runHook(item) } catch (error) {
+      // A row whose file went before its hook claimed it is spooled again and written once more.
+      if (error.unspooled) {
+        place(item)
+        return await runHook(item)
       }
-    }).finally(() => queued.delete(write)).catch(error => keepUnconfirmed(context, payload, write.body, error))
-      .catch(error => console.error(`[vigil] Native activity accounting failed: ${error.message}`))
+      if (error.started) throw error
+      await new Promise(resolve => setTimeout(resolve, 250))
+      await runHook(item)
+    }
+  }
+  const pump = () => {
+    for (let index = 0; index < ready.length && running.size < ACTIVITY_LOGGERS;) {
+      const lane = ready[index]
+      const item = lanes.get(lane)[0]
+      if (!item.named && [...running.values()].some(other => !other.named)) {
+        index += 1
+        continue
+      }
+      ready.splice(index, 1)
+      lanes.get(lane).shift()
+      running.set(lane, item)
+      write(item).catch(error => keepUnconfirmed(item.context, item.payload, item.body, error))
+        .catch(error => console.error(`[vigil] Native activity accounting failed: ${error.message}`))
+        .finally(() => {
+          unspool(item)
+          queued.delete(item)
+          running.delete(lane)
+          if (lanes.get(lane)?.length) ready.push(lane); else lanes.delete(lane)
+          pump()
+        })
+    }
+  }
+  // Rows whose own catalog read has not answered, each with the payload the latest catalog gives it.
+  const resolving = new Set()
+  // A catalog read answered: a row still waiting on its own read is spooled under that catalog's name.
+  const catalogRead = () => {
+    for (const item of resolving) {
+      const value = item.guess()
+      if (!value) continue
+      item.payload = value
+      item.body = item.serialize(value)
+      try { respool(item) } catch {}
+    }
+  }
+  // `named`, when given, settles to the final payload (a catalog-resolved tool name);
+  // the row keeps its place in its session's queue meanwhile, so the tool result is not held for it.
+  // Until then its spool file holds `payload`, or what `guess` gives once a catalog is read.
+  const writeActivity = (context, payload, named, guess = () => null) => {
+    // Serialized now: the write runs after the tool result has moved on.
+    const serialize = value => JSON.stringify({...value, cwd: context.engagement_dir})
+    const item = {context, payload, body: serialize(payload), sequence: sequence += 1, serialize, guess,
+      named: typeof payload.tool_use_id === "string" && payload.tool_use_id !== ""}
+    if (queued.size >= ACTIVITY_BACKLOG) {
+      const overflow = new Error(`${ACTIVITY_BACKLOG} activity writes already queued`)
+      if (!named) return keepUnconfirmed(context, payload, item.body, overflow)
+      return void named.then(value => [value, serialize(value)], () => [payload, item.body])
+        .then(([value, body]) => keepUnconfirmed(context, value, body, overflow))
+        .catch(error => console.error(`[vigil] Native activity accounting failed: ${error.message}`))
+    }
+    place(item)
+    queued.add(item)
+    // A payload that cannot be completed is not recorded, as when it fails before queueing.
+    if (named) resolving.add(item)
+    item.ready = named?.then(value => {
+      resolving.delete(item)
+      item.payload = value
+      item.body = serialize(value)
+      try { respool(item) } catch (error) { item.failed = error }
+    }, error => { resolving.delete(item); item.failed = error })
+    const lane = typeof payload.session_id === "string" ? payload.session_id : ""
+    if (!lanes.has(lane)) lanes.set(lane, [])
+    lanes.get(lane).push(item)
+    if (lanes.get(lane).length === 1 && !running.has(lane)) ready.push(lane)
+    pump()
   }
   // Extends a native summary request with the preservation contract.
-  const compacting = (session, push) => {
+  const compacting = async (session, push) => {
     try {
       const context = readContext()
-      const contract = hook(context, "pre-compact.sh", {hook_event_name: "PreCompact", trigger: "native"})
+      const contract = await hook(context, "pre-compact.sh", {hook_event_name: "PreCompact", trigger: "native"})
       if (!contract.trim()) throw new Error("Empty compaction contract")
       push(contract)
       observe(context, session, {compacting_observed: true, recovery_pending: true})
@@ -362,7 +519,7 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
       return
     }
     if (native.summary) {
-      const resume = hook(context, "post-compact-resume.sh", {hook_event_name: "SessionStart", source: "compact"})
+      const resume = await hook(context, "post-compact-resume.sh", {hook_event_name: "SessionStart", source: "compact"})
       if (!resume.trim()) throw new Error("Recovery context is unavailable")
       push(`Standing recovery contract for native summary ${native.summary}: apply the following once if hydration for this exact summary is not already completed in the current native tool history. Do not restart hydration already completed in this continuation.\n` + resume)
       observe(context, session, {last_summary_id: native.summary, context_injected: true,
@@ -375,142 +532,16 @@ const runtime = ({bindingPath, activityTimeoutMs}) => {
   }
   const unverified = error => `Vigil context could not be verified: ${error.message}. STOP dependent work and use the bound helper to restore the selected workflow; do not infer state from a summary.`
   return {readContext, state, observe, dispatches, dispatchFor, bindingReport, statusReport, writeActivity,
-    compacting, restore, unverified}
+    catalogRead, compacting, restore, unverified}
 }
 
-// OpenCode 1.x: a `server` plugin whose client reads the session's full message history.
-export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT,
-  activityTimeoutMs = 60000}) => {
-  const {readContext, dispatches, bindingReport, statusReport, writeActivity, compacting, restore, unverified}
-    = runtime({bindingPath, activityTimeoutMs})
-  const request = async sessionID => {
-    const response = await client.session.messages({path: {id: sessionID}})
-    if (response.error || !Array.isArray(response.data)) throw new Error("Native messages unavailable")
-    const session = await client.session.get({path: {id: sessionID}})
-    if (session.error || !session.data || session.data.id !== sessionID) throw new Error("Native session unavailable")
-    let messages = response.data.slice().sort((a, b) =>
-      (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0) || String(a.info?.id).localeCompare(String(b.info?.id)))
-    const boundary = session.data.revert?.messageID
-    if (boundary) {
-      const index = messages.findIndex(message => message.info?.id === boundary)
-      if (index < 0) throw new Error("Native revert boundary unavailable")
-      // The current unfinished request is created after the active revert and is
-      // still needed for attribution. Historical summaries beyond it are not.
-      const current = messages.filter(message => message.info?.role === "assistant" && !message.info?.finish && !message.info?.error)
-      messages = [...messages.slice(0, index), ...current]
-    }
-    const assistants = messages.filter(message => message.info?.role === "assistant")
-    const pending = [...new Map(assistants.filter(message => !message.info.finish && !message.info.error)
-      .map(message => [message.info.id, message.info])).values()]
-    const current = pending.length === 1 ? pending[0] : null
-    if (!current || current.sessionID !== sessionID)
-      throw new Error("Current unfinished assistant cannot be correlated")
-    return {current, messages, boundary: boundary || null, parentID: session.data.parentID,
-      directory: session.data.directory}
-  }
-  // A native task names its dispatch in the child's first user message.
-  const launchOf = native => {
-    const launch = native.messages.find(message => message.info?.role === "user")
-    const info = native.current
-    return {text: (launch?.parts || []).filter(part => part?.type === "text").map(part => String(part.text)).join("\n"),
-      directory: native.directory, agent: info.agent, model: `${info.providerID}/${info.modelID}`,
-      variant: info.variant, at: "first request"}
-  }
-  // The same reading OpenCode's renderer applies to a task result.
-  const taskResultEmpty = text => {
-    const value = String(text ?? "")
-    const wrapped = /<task_result>\s*([\s\S]*?)\s*<\/task_result>/.exec(value)
-    return !(wrapped ? wrapped[1] : value.split("\n").filter(line => !line.startsWith("task_id:")).join("\n")).trim()
-  }
-  const reportTask = async output => {
-    const session = output?.metadata?.sessionId
-    if (typeof session !== "string" || !dispatches.has(session)) return
-    const record = await dispatches.get(session)
-    const empty = taskResultEmpty(output.output)
-    const binding = bindingReport(record)
-    if (binding) {
-      record.reported = true
-      output.output = `${output.output ?? ""}\n\n${binding}`
-    }
-    const status = await statusReport(record, empty)
-    if (status) output.output = `${output.output ?? ""}\n\n${status}`
-  }
-  const toolName = tool => ({bash: "Bash", read: "Read", write: "Write", edit: "Edit",
-    task: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}[tool] || tool)
-  const nativeToolName = async tool => {
-    if (toolName(tool) !== tool) return toolName(tool)
-    // The public SDK exposes connected MCP servers and the built-in/custom
-    // registry separately. Do not classify arbitrary underscore names as MCP.
-    let timer
-    try {
-      const [servers, local] = await Promise.race([
-        Promise.all([client.mcp.status(), client.tool.ids()]),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Native tool catalog timeout")), 1000) }),
-      ])
-      if (servers.error || local.error || !servers.data || !Array.isArray(local.data))
-        throw new Error("Native tool catalog unavailable")
-      if (!local.data.includes(tool) && Object.entries(servers.data).some(([server, status]) =>
-        status.status === "connected" && tool.startsWith(server.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")))
-        return "mcp__" + tool
-    } catch (error) {
-      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
-    } finally { clearTimeout(timer) }
-    return tool
-  }
-  const log = async (input, output, failed = false) => {
-    try {
-      const context = readContext()
-      let actor = "unknown"
-      try { actor = (await request(input.sessionID)).current.agent || "unknown" } catch {}
-      const name = await nativeToolName(input.tool)
-      const response = failed ? {...output, stderr: String(output.error || "Native tool failed"), exit_code: 1}
-        : {...output, ...output.metadata,
-          ...(input.tool === "bash" && output.metadata?.exit !== undefined ? {exit_code: output.metadata.exit} : {})}
-      // The shared logger retains its existing bounded projection. Keep all
-      // original native data available to that projection, including mixed MCP
-      // content and structured-only results; never stringify undefined output.
-      if (name.startsWith("mcp__")) response.output = JSON.stringify(response)
-      writeActivity(context, {hook_event_name: "PostToolUse", client_name: "opencode",
-        session_id: input.sessionID, tool_use_id: input.callID, agent_type: actor,
-        tool_name: name, native_tool_name: input.tool, tool_input: ["write", "edit"].includes(input.tool)
-          ? {...(input.args || {}), file_path: input.args?.file_path ?? input.args?.filePath}
-          : input.args || {},
-        tool_response: response})
-    } catch (error) { console.error(`[vigil] Native activity was not recorded: ${error.message}`) }
-  }
-  return {
-    "tool.execute.after": async (input, output) => {
-      if (input.tool === "task") await reportTask(output)
-      return log(input, output)
-    },
-    event: async ({event}) => {
-      const part = event.properties?.part
-      if (event.type === "message.part.updated" && part?.type === "tool" && part.state?.status === "error")
-        await log({tool: part.tool, sessionID: part.sessionID, callID: part.callID, args: part.state.input},
-          {error: part.state.error}, true)
-    },
-    "experimental.session.compacting": async (input, output) =>
-      compacting(input.sessionID, text => output.context.push(text)),
-    "experimental.chat.system.transform": async (input, output) => {
-      try {
-        const context = readContext()
-        const native = await request(input.sessionID)
-        const info = native.current
-        // This callback also runs for the summarizer with the same sessionID.
-        if (info.agent === "compaction" || info.mode === "compaction" || info.summary) return
-        if (input.model && (info.providerID !== input.model.providerID || info.modelID !== input.model.id))
-          throw new Error("Native request model correlation is ambiguous")
-        await restore(context, input.sessionID, {agent: info.agent, parentID: native.parentID, boundary: native.boundary,
-          summary: native.messages.filter(message => message.info?.summary && message.info?.finish && !message.info?.error).at(-1)?.info?.id,
-          launch: () => launchOf(native)}, text => output.system.push(text))
-      } catch (error) {
-        output.system.push(unverified(error))
-      }
-    },
-  }
-}
+// The row under its catalog-resolved name. The shared logger retains its existing bounded
+// projection; an MCP row keeps all original native data available to that projection,
+// including mixed content and structured-only results, and never stringifies undefined output.
+const withToolName = (payload, name) => ({...payload, tool_name: name, ...(name.startsWith("mcp__")
+  ? {tool_response: {...payload.tool_response, output: JSON.stringify(payload.tool_response)}} : {})})
 
-// OpenCode 2.x: hooks registered through the plugin context. Names follow the 2.x plugin
+// Hooks registered through the OpenCode 2 plugin context. Names follow its plugin
 // API (ToolHooks, SessionHooks); an unknown name would register and never fire.
 const V2_HOOKS = [["tool", "execute.after"], ["session", "prompt"], ["session", "context"],
   ["session", "compaction"], ["session", "experimental.idle"]]
@@ -521,11 +552,11 @@ const V2_TOOL_NAMES = {shell: "Bash", read: "Read", write: "Write", edit: "Edit"
 const CONVERSATION = new Set(["user", "synthetic", "assistant", "compaction", "shell", "skill"])
 const isObject = value => typeof value === "object" && value !== null && !Array.isArray(value)
 
-// Registers the 2.x hooks, routing each to `invoke(key, event)`; every callback contains its
-// own failure, because a rejected 2.x hook fails the native operation it belongs to.
+// Registers the hooks, routing each to `invoke(key, event)`; every callback contains its
+// own failure, because a rejected hook fails the native operation it belongs to.
 export const registerV2Hooks = async (ctx, invoke) => {
-  // OpenCode 2 ignores the 1.x launch's default shell budget; give a call that names no
-  // timeout the same budget. Shell timeouts are milliseconds; background commands keep none.
+  // OpenCode does not read the launch's default shell budget itself; give a call that names
+  // no timeout that budget. Shell timeouts are milliseconds; background commands keep none.
   const budget = Number(process.env.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS)
   if (Number.isSafeInteger(budget) && budget > 0)
     await ctx.tool.hook("execute.before", event => {
@@ -554,7 +585,7 @@ export const registerV2Hooks = async (ctx, invoke) => {
 export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIGIL_CLIENT_CONTEXT,
   activityTimeoutMs = 60000}) => {
   const {readContext, state, observe, dispatches, dispatchFor, bindingReport, statusReport, writeActivity,
-    compacting, restore, unverified} = runtime({bindingPath, activityTimeoutMs})
+    catalogRead, compacting, restore, unverified} = runtime({bindingPath, activityTimeoutMs})
   const system = event => text => event.system.push({type: "text", text})
   const session = async sessionID => {
     const info = await ctx.session.get({sessionID})
@@ -570,9 +601,16 @@ export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIG
   const launches = new Map()
   const launchOf = (info, text, model, at) => ({text: String(text ?? ""), directory: info.location?.directory,
     agent: info.agent, model: model ? `${model.providerID}/${model.id}` : "unknown", variant: model?.variant, at})
-  const nativeToolName = async tool => {
-    if (V2_TOOL_NAMES[tool]) return V2_TOOL_NAMES[tool]
-    // An MCP tool is registered under its server's normalized name as namespace.
+  // An MCP tool is registered under its server's normalized name as namespace.
+  const classify = (tool, {servers, tools}) => {
+    const namespace = tools.find(entry => entry?.id === tool)?.options?.namespace
+    return namespace && servers.some(server => server?.status?.status === "connected"
+      && String(server.name).replace(/[^a-zA-Z0-9_-]/g, "_") === namespace) ? "mcp__" + tool : tool
+  }
+  // The last catalog this process read names a row whose own read has not answered when OpenCode ends.
+  let catalog = null
+  let prefetched = false
+  const readCatalog = async () => {
     let timer
     try {
       const [servers, tools] = await Promise.race([
@@ -580,14 +618,20 @@ export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIG
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Native tool catalog timeout")), 1000) }),
       ])
       if (!Array.isArray(servers?.data) || !Array.isArray(tools)) throw new Error("Native tool catalog unavailable")
-      const namespace = tools.find(entry => entry?.id === tool)?.options?.namespace
-      if (namespace && servers.data.some(server => server?.status?.status === "connected"
-          && String(server.name).replace(/[^a-zA-Z0-9_-]/g, "_") === namespace)) return "mcp__" + tool
-    } catch (error) {
-      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
+      catalog = {servers: servers.data, tools}
+      catalogRead()
+      return catalog
     } finally { clearTimeout(timer) }
+  }
+  const nativeToolName = async tool => {
+    if (V2_TOOL_NAMES[tool]) return V2_TOOL_NAMES[tool]
+    try { return classify(tool, await readCatalog()) } catch (error) {
+      console.error(`[vigil] Native MCP identity could not be verified: ${error.message}`)
+    }
     return tool
   }
+  // The catalog's name for a tool, or null before any catalog read has answered.
+  const knownToolName = tool => V2_TOOL_NAMES[tool] || catalog && classify(tool, catalog)
   const toolInput = (tool, input) => ["write", "edit"].includes(tool) ? {...input, file_path: input.file_path ?? input.path}
     : tool === "subagent" ? {...input, subagent_type: input.agent}
       : tool === "patch" ? {...input, command: input.patchText} : input
@@ -596,9 +640,14 @@ export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIG
       : (Array.isArray(result.content) ? result.content : []).filter(part => part?.type === "text")
         .map(part => String(part.text)).join("\n")
   const log = async event => {
+    const occurredAt = new Date().toISOString()
     try {
       const context = readContext()
-      const name = await nativeToolName(event.tool)
+      // A catalog read finishes in the row's queue slot, after the call has returned.
+      const named = V2_TOOL_NAMES[event.tool] ? null : nativeToolName(event.tool)
+      // The first call reads the catalog, so a later row has one to fall back on.
+      if (!prefetched && !named) readCatalog().catch(() => {})
+      prefetched = true
       let response
       if (event.status === "error") {
         const error = isObject(event.error) ? {...event.error, message: event.error.message} : event.error
@@ -610,11 +659,16 @@ export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIG
         const exit = structured.exitCode ?? result.metadata?.exit
         if (event.tool === "shell" && exit !== undefined && exit !== null) response.exit_code = exit
       }
-      if (name.startsWith("mcp__")) response.output = JSON.stringify(response)
-      writeActivity(context, {hook_event_name: "PostToolUse", client_name: "opencode",
-        session_id: event.sessionID, tool_use_id: event.id, agent_type: event.agent || "unknown",
-        tool_name: name, native_tool_name: event.tool,
-        tool_input: toolInput(event.tool, isObject(event.input) ? event.input : {}), tool_response: response})
+      // A call id is unique within its message, so the message names the call too.
+      const call = typeof event.messageID === "string" && event.messageID && typeof event.id === "string" && event.id
+        ? `${event.messageID}/${event.id}` : event.id
+      const payload = {hook_event_name: "PostToolUse", client_name: "opencode",
+        session_id: event.sessionID, tool_use_id: call, agent_type: event.agent || "unknown",
+        tool_name: V2_TOOL_NAMES[event.tool] || event.tool, native_tool_name: event.tool,
+        tool_input: toolInput(event.tool, isObject(event.input) ? event.input : {}), tool_response: response,
+        occurred_at: occurredAt}
+      const guess = () => { const known = knownToolName(event.tool); return known && withToolName(payload, known) }
+      writeActivity(context, (named && guess()) || payload, named?.then(name => withToolName(payload, name)), guess)
     } catch (error) { console.error(`[vigil] Native activity was not recorded: ${error.message}`) }
   }
   return {
@@ -657,9 +711,9 @@ export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIG
       }
     },
     "session.compaction": async event => compacting(event.sessionID, system(event)),
-    // The subagent tool returns at once, so the report OpenCode 1 appended to the task
-    // result goes to the operator's session as a note that does not wake it: it is read
-    // with the <subagent> report that follows this child going idle.
+    // The subagent tool returns at once, so the dispatch report goes to the operator's
+    // session as a note that does not wake it: it is read with the <subagent> report
+    // that follows this child going idle.
     "session.experimental.idle": async event => {
       try {
         const pending = dispatches.get(event.sessionID)
@@ -698,7 +752,6 @@ export const VigilAssessmentHooksV2 = async ({ctx, bindingPath = process.env.VIG
 
 export default {
   id: "vigil-assessment-hooks",
-  server: VigilAssessmentHooks,
   setup: async ctx => {
     const adapter = await VigilAssessmentHooksV2({ctx})
     return registerV2Hooks(ctx, (key, event) => adapter[key](event))

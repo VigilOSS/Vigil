@@ -33,6 +33,7 @@ from .audit_enums import PROBE_KIND_ENUM
 from .kali_audit import _INTENT_MAX_LEN, ALLOWED_PHASES
 from .kali_output import KALI_EXIT_CODES
 from .phases import CODE_PHASE_AUDIT_TAGS, CODE_PHASES
+from .skip_reasons import CODE_SKIP_REASONS
 from .surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
 
 
@@ -137,21 +138,6 @@ _DISPATCH_FINDING_SLUGS_HELP: dict[str, str] = {
 def dispatch_finding_slugs_help() -> str:
     """The `agent done --finding-slugs` helper-default line, from the live semantics."""
     return _DISPATCH_FINDING_SLUGS_HELP[DISPATCH_FINDING_SLUGS_WRITE]
-
-
-# MIRRORS app.services.code_analysis.SKIP_REASONS, the one standard vocabulary a
-# skip is accounted under. Two doors now write it — `code-dispatch done
-# --skip-reason` at closeout and `code-record classify` at classification time —
-# so the set is named once here instead of spelled out per contract. Agent code
-# cannot import the backend; pinned in sync by
-# test_the_cli_and_api_agree_on_one_closeout_vocabulary.
-CODE_SKIP_REASONS: tuple[str, ...] = (
-    "test-fixture",
-    "generated-code",
-    "minified",
-    "out-of-scope-language",
-    "vendored-dependency",
-)
 
 
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
@@ -4084,6 +4070,7 @@ _CONTRACT_SPECS: dict[str, CommandContract] = {
             "action (positional, trimmed to 3800 chars)",
             "result (positional, trimmed to 3800 chars)",
             "--metadata-inline '<json object>' / --metadata-file <path> (stored on activity_entries.metadata)",
+            "--occurred-at <ISO-8601 instant with UTC offset, not in the future, at most 64 characters> (when the logged action happened; defaults to the time the backend records the row, which also dates it when the value breaks those limits; stderr names the reason)",
         ),
         helper_defaults=(
             ("actor_kind", "agent (override with `vigil assess --actor-kind {operator|agent|hook|system} log ...`)"),

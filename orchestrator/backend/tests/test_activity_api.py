@@ -209,6 +209,28 @@ def test_activity_timestamp_filters_compare_instants_and_reject_invalid_values(
     assert invalid_filter.status_code == 422, invalid_filter.text
 
 
+def test_activity_timestamps_beyond_the_utc_range_are_refused_as_invalid(client, isolate_settings):
+    """An instant whose UTC reading falls outside the calendar is a bad value, not a server error."""
+    _seed_engagement(client, isolate_settings)
+
+    for value in ("0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59-14:00"):
+        posted = client.post(BASE, json={"occurred_at": value, "title": "Out of range"})
+        assert posted.status_code == 422, posted.text
+        filtered = client.get(BASE, params={"since": value})
+        assert filtered.status_code == 422, filtered.text
+
+
+def test_the_cli_forwards_only_a_finish_time_the_api_field_holds() -> None:
+    """`vigil assess log` drops a longer `--occurred-at`, so the row is never refused for it."""
+    from app.api.intel_schemas import ActivityEntryRecordRequest
+    from assess.commands import log_entry
+
+    field = ActivityEntryRecordRequest.model_fields["occurred_at"]
+    assert [rule.max_length for rule in field.metadata if hasattr(rule, "max_length")] == [
+        log_entry._OCCURRED_AT_MAX_LENGTH
+    ]
+
+
 def test_activity_entries_list_unknown_engagement_returns_404(client, isolate_settings):
     response = client.get("/engagements/does-not-exist/activity-entries")
     assert response.status_code == 404

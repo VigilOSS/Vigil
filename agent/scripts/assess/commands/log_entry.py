@@ -9,7 +9,13 @@ event. CLI shape is preserved for back-compat with existing agents:
 An optional positional ``eng_dir`` is still accepted in the first slot —
 older callers used that calling convention before ``--engagement-dir``
 resolution was centralized. When five positional args are given, the first
-is treated as the engagement dir; with four, it's the agent name.
+is treated as the engagement dir; with four, it's the agent name. Without
+the positional, the root ``--engagement-dir`` flag selects the engagement.
+
+Callers passing text they do not control put ``--`` before the positionals,
+so a value such as ``-n`` or ``--help`` stays a value:
+
+    vigil assess --engagement-dir <dir> log --actor-kind hook -- <agent> <title> <action> <result>
 """
 from __future__ import annotations
 
@@ -17,6 +23,7 @@ import argparse
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.code_record_input import fail
@@ -46,9 +53,48 @@ def register(subparsers) -> None:
             "`vigil assess --actor-kind operator log ...`."
         ),
     )
+    p.add_argument(
+        "--occurred-at",
+        help=(
+            "When the logged action happened: an ISO-8601 instant with a UTC offset, not in the future, "
+            "at most 64 characters (a queued logger passes the call's finish time). Defaults to when the "
+            "backend records the row; any other value is reported on stderr with its reason and the row "
+            "is recorded with that default."
+        ),
+    )
     p.add_argument("--metadata-inline", help="Inline JSON object stored on activity_entries.metadata")
     p.add_argument("--metadata-file", type=input_path, help="Path to a JSON object stored on activity_entries.metadata")
     p.set_defaults(func=run)
+
+
+# MIRRORS app.api.intel_schemas.ActivityEntryRecordRequest.occurred_at (max_length).
+# post-tool-log.sh forwards a longer value too, up to an argv-size bound, so this
+# check is the one that judges it.
+_OCCURRED_AT_MAX_LENGTH = 64
+
+
+def _instant_problem(value: str) -> str | None:
+    """Why ``value`` cannot date the row, or None when it can.
+
+    The activity feed orders rows by this instant, so a future one would stay above
+    every row recorded after it. The backend refuses a value longer than its field or
+    one whose UTC reading falls outside the calendar, which would lose the row.
+    """
+    if len(value) > _OCCURRED_AT_MAX_LENGTH:
+        return f"longer than {_OCCURRED_AT_MAX_LENGTH} characters"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return "not an ISO-8601 instant"
+    if parsed.tzinfo is None:
+        return "has no UTC offset"
+    try:
+        instant = parsed.astimezone(timezone.utc)
+    except OverflowError:
+        return "outside the UTC calendar"
+    if instant > datetime.now(timezone.utc):
+        return "in the future"
+    return None
 
 
 def _trim(text: str) -> str:
@@ -64,7 +110,9 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 def run(args) -> None:
-    eng_dir = args.eng_dir
+    # The legacy positional names the engagement for this one entry; otherwise the
+    # root `--engagement-dir` flag does, as for every other verb.
+    eng_dir = args.eng_dir if args.eng_dir is not None else getattr(args, "engagement_dir", None)
     agent = args.agent
     title = args.title
     action = args.action
@@ -108,6 +156,15 @@ def run(args) -> None:
         "action": _truncate(action, 3800),
         "result": _truncate(result, 3800),
     }
+    requested_at = getattr(args, "occurred_at", None)
+    if requested_at is not None:
+        # The row is never lost to its date: an unusable one leaves it to the backend.
+        problem = _instant_problem(requested_at)
+        if problem is not None:
+            print(f"vigil assess log: ignoring --occurred-at {requested_at!r}: {problem}; "
+                  "the backend dates the row when it records it", file=sys.stderr)
+        else:
+            payload["occurred_at"] = requested_at
     if metadata is not None:
         payload["metadata"] = metadata
 

@@ -160,9 +160,6 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `orchestrator_base_url` and `install.root` settings belong to; `agent/scripts/assess/lib/config.py:resolve_base_url`
   mirrors `paths.py:resolve_orchestrator_base_url` across the assess exec boundary. See:
   `tests/test_orchestrator_endpoint_selection.py`, `agent/scripts/assess/tests/test_assess_workspace_base_url.py`.
-- `src/vigil_cli/config.py:claude_session_model` owns the Claude operator model per offensive track (`CLAUDE_TRACK_MODELS`)
-  and its `VIGIL_CLAUDE_MODEL_<TRACK>` / `claude.model.<track>` overrides; `engagements.py:start_engagement` passes it as
-  `--model=` unless the client tail forwards one. See: `tests/test_claude_session_model.py`.
 - `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
 - `agent/scripts/assess/commands/agent.py` captures optional standing briefs by content digest;
   dispatch packets, launch continuations and `dispatch/handoff_renderer.py` share the immutable path and digest.
@@ -176,7 +173,10 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `orchestrator/backend/app/json_response.py` owns lossless JSON escaping for validation errors
   and the activity API; activity response models validate Python values before transport rendering.
 - `services/activity_feed.py:get_activity_entry` owns `GET /engagements/{key}/activity/{entry_id}` (`audit:<id>` or
-  `event:<id>`): the item comes from the feed's own page projection, so it equals the feed's item for that row.
+  `event:<id>`) from the feed's own page projection.
+- `services/activity_feed.py:FeedCursor` owns feed cursors; clients catch up from each response's `catch_up_cursor`.
+- `log_entry.py:_OCCURRED_AT_MAX_LENGTH` mirrors `ActivityEntryRecordRequest.occurred_at`; see `test_activity_api.py`.
+- `standard-hooks.js` and `assessment-hooks.js` mirror spool `CLAIM`/`DRAIN`; see `test_opencode2_plugin.py`.
 - `orchestrator/frontend/src/components/record/RecordView.tsx` is the one detail view: Submissions, Proof work
   (`?proof={slug}`) and Activity (`activity/ActivityRecord.tsx`, `?entry={id}`) open in it; `App.tsx` parses the routes.
 - `artifact_index.py:prepared_artifact_health` owns root-pinned evidence observations;
@@ -187,7 +187,6 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   recorded replays from fresh mutations.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEY` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers and preflight consume them.
-- `src/vigil_cli/opencode_launch.py:LAUNCHER_MAJOR_PATTERN` is read alike by Python and `start_opencode.sh`.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses (never mtime).
 - `src/vigil_cli/runtime_images.py` owns immutable release pins and label validation; the release workflow embeds the pin.
 - `src/vigil_cli/mitmproxy.py` owns the proxy `docker build` argv and its inputs-digest label.

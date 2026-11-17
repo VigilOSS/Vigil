@@ -4,7 +4,7 @@ import {join, dirname} from "node:path"
 import {pathToFileURL, fileURLToPath} from "node:url"
 
 const directory = dirname(dirname(fileURLToPath(import.meta.url)))
-// The launch this staged copy belongs to; both majors refuse to load for any other.
+// The launch this staged copy belongs to; the plugin refuses to load for any other.
 const launchProject = async () => {
   const project = await import(pathToFileURL(join(directory, "vigil-project.mjs")))
   const path = process.env.VIGIL_CLIENT_CONTEXT
@@ -17,61 +17,7 @@ const launchProject = async () => {
 }
 const unavailable = error => `Vigil task binding unavailable: ${error.message}. Explain the recovery action and wait before dependent work.`
 
-export const VigilAssessmentHooks = async ({client}) => {
-  const {readSession, bindSession, currentBinding, project} = await launchProject()
-  const adapters = new Map()
-  const resolveBinding = async (session, seen = new Set()) => {
-    if (typeof session !== "string" || !session || seen.has(session) || seen.size >= 16)
-      throw new Error("Invalid native session lineage")
-    const previous = readSession(project, "opencode", session)
-    if (previous) return previous
-    seen.add(session)
-    const response = await client.session.get({path: {id: session}})
-    if (response.error || response.data?.id !== session) throw new Error("Native session unavailable")
-    let selected
-    if (response.data.parentID) {
-      selected = await resolveBinding(response.data.parentID, seen)
-    } else {
-      const messages = await client.session.messages({path: {id: session}})
-      if (messages.error || !Array.isArray(messages.data)) throw new Error("Native task history unavailable")
-      if (messages.data.some(message => message.info?.role === "assistant" && message.info?.finish))
-        throw new Error("Existing conversation has no retained Vigil binding; create a NEW task rather than selecting a new context for old history")
-      selected = currentBinding(project)
-    }
-    return bindSession(project, "opencode", session, selected)
-  }
-  const adapter = async session => {
-    const binding = await resolveBinding(session)
-    if (!adapters.has(binding.binding_path)) {
-      const source = join(binding.workspace, ".opencode/vigil-assessment-runtime.mjs")
-      const module = await import(pathToFileURL(source))
-      adapters.set(binding.binding_path, await module.VigilAssessmentHooks({client, bindingPath: binding.binding_path}))
-    }
-    return adapters.get(binding.binding_path)
-  }
-  const invoke = async (name, input, output) => {
-    try { await (await adapter(input.sessionID))[name](input, output) }
-    catch (error) {
-      const message = unavailable(error)
-      if (name === "experimental.chat.system.transform") output.system.push(message)
-      else if (name === "experimental.session.compacting") output.context.push(message)
-      else console.error(message)
-    }
-  }
-  return {
-    "tool.execute.after": async (input, output) => invoke("tool.execute.after", input, output),
-    "experimental.chat.system.transform": async (input, output) => invoke("experimental.chat.system.transform", input, output),
-    "experimental.session.compacting": async (input, output) => invoke("experimental.session.compacting", input, output),
-    event: async ({event}) => {
-      const part = event.properties?.part
-      if (event.type !== "message.part.updated" || part?.type !== "tool" || part.state?.status !== "error") return
-      try { await (await adapter(part.sessionID)).event({event}) }
-      catch (error) { console.error(`[vigil] Native activity unavailable: ${error.message}`) }
-    },
-  }
-}
-
-// OpenCode 2.x: the same lineage, read through the plugin context's session domain.
+// A session's task binding follows its native lineage, read through the plugin context's session domain.
 const setup = async ctx => {
   const {readSession, bindSession, currentBinding, project} = await launchProject()
   const {registerV2Hooks} = await import(pathToFileURL(join(directory, "vigil-assessment-runtime.mjs")))
@@ -105,7 +51,7 @@ const setup = async ctx => {
       const loading = (async () => {
         const module = await import(pathToFileURL(join(binding.workspace, ".opencode/vigil-assessment-runtime.mjs")))
         if (typeof module.VigilAssessmentHooksV2 !== "function")
-          throw new Error("This task's retained Vigil runtime has no OpenCode 2 adapter; continue it with OpenCode 1 or start a NEW task")
+          throw new Error("This task's retained Vigil runtime has no OpenCode 2 adapter; start a NEW task")
         return module.VigilAssessmentHooksV2({ctx, bindingPath: binding.binding_path})
       })()
       adapters.set(binding.binding_path, loading)
@@ -128,4 +74,4 @@ const setup = async ctx => {
   })
 }
 
-export default {id: "vigil-assessment", server: VigilAssessmentHooks, setup}
+export default {id: "vigil-assessment", setup}

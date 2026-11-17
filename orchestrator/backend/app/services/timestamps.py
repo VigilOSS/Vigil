@@ -16,7 +16,11 @@ def parse_utc(raw: str) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError:
+        # A local time whose UTC reading falls outside the calendar (year 1 at +14:00).
+        return None
 
 
 def iso_z(parsed: datetime) -> str:

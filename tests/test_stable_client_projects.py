@@ -5,9 +5,11 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from test_opencode2_plugin import _context_event, _host, _texts
 from vigil_cli import assessment_clients
 from vigil_cli.assessment_clients import prepare_workspace
 from vigil_cli.client_projects import prepare_project
@@ -42,25 +44,26 @@ def prepared(tmp_path, monkeypatch):
     return prepare
 
 
-def _opencode(snapshot, session, *, parent=None):
+def _opencode(snapshot, *sessions, parent=None, between=None):
+    """One OpenCode process launched from ``snapshot``: a request (session.context) for each session in turn.
+
+    Each session is a new operator conversation, a child of ``parent`` when one is named. ``between`` is
+    written as {path, text} after each request. ``stdout`` is each request's system text, ``stderr`` the
+    plugin's errors."""
     binding = json.loads((snapshot / ".vigil-client-context.json").read_text())
-    script = """
-import {pathToFileURL} from 'node:url';
-const module=await import(pathToFileURL(process.argv[1]).href);
-const session=process.argv[2];
-const client={session:{get:async({path})=>({data:{id:path.id,parentID:process.argv[3]||undefined}}),
- messages:async()=>({data:[{info:{role:'assistant',id:'a1',sessionID:session,
- agent:'operator',time:{created:1},modelID:'model',providerID:'provider'}}]})}};
-const adapter=await module.VigilAssessmentHooks({client});
-const output={system:[]};
-await adapter['experimental.chat.system.transform']({sessionID:session,model:{id:'model',providerID:'provider'}},output);
-process.stdout.write(JSON.stringify(output));
-"""
-    return subprocess.run(["node", "--input-type=module", "-e", script,
-        str(snapshot / ".opencode/plugins/vigil-assessment.js"), session, parent or ""],
-        env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(snapshot / ".vigil-client-context.json"),
-             "VIGIL_INSTALL_DIR": binding["install_root"]},
-        capture_output=True, text=True, timeout=15, check=True)
+    native = {session: {"id": session, "agent": "operator", **({"parentID": parent} if parent else {})}
+              for session in sessions}
+    steps = []
+    for session in sessions:
+        steps.append({"hook": "session.context", "event": _context_event(session)})
+        if between:
+            steps.append({"write": between})
+    log = _host(snapshot / ".opencode/plugins/vigil-assessment.js",
+                env={"VIGIL_CLIENT_CONTEXT": str(snapshot / ".vigil-client-context.json"),
+                     "VIGIL_INSTALL_DIR": binding["install_root"]},
+                sessions={**({parent: {"id": parent, "agent": "operator"}} if parent else {}), **native}, steps=steps)
+    requests = ["\n".join(_texts(result["event"])) for result in log["results"] if result["hook"] == "session.context"]
+    return SimpleNamespace(stdout="\n".join(requests), stderr="\n".join(log["errors"]), requests=requests)
 
 
 def test_opencode_existing_native_task_retains_binding_across_processes(prepared):
@@ -203,30 +206,8 @@ def test_opencode_new_task_in_running_process_uses_current_project_selection(pre
     _, _, b = prepared("opencode", "2")
     new_selection = (project / ".vigil-current-context.json").read_text()
     (project / ".vigil-current-context.json").write_bytes(old_selection)
-    script = """
-import {pathToFileURL} from 'node:url';
-import {writeFileSync} from 'node:fs';
-const module=await import(pathToFileURL(process.argv[1]).href);
-let active;
-const client={session:{get:async({path})=>({data:{id:path.id}}),messages:async()=>({data:[{info:{
- role:'assistant',id:'a1',sessionID:active,agent:'operator',time:{created:1},modelID:'model',providerID:'provider'}}]})}};
-const adapter=await module.VigilAssessmentHooks({client});
-const outputs=[];
-for(const session of ['old-session','new-session','old-session']){
- active=session;
- const output={system:[]};
- await adapter['experimental.chat.system.transform']({sessionID:session,model:{id:'model',providerID:'provider'}},output);
- outputs.push(output.system.join('\\n'));
- writeFileSync(process.argv[2],process.argv[3]);
-}
-process.stdout.write(JSON.stringify(outputs));
-"""
-    result = subprocess.run(["node", "--input-type=module", "-e", script,
-        str(first / ".opencode/plugins/vigil-assessment.js"), str(project / ".vigil-current-context.json"), new_selection],
-        env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(first / ".vigil-client-context.json"),
-             "VIGIL_INSTALL_DIR": a["install_root"]},
-        capture_output=True, text=True, timeout=15, check=True)
-    outputs = json.loads(result.stdout)
+    outputs = _opencode(first, "old-session", "new-session", "old-session",
+                        between={"path": str(project / ".vigil-current-context.json"), "text": new_selection}).requests
     assert a["vigil_cli"] in outputs[0]
     assert b["vigil_cli"] in outputs[1]
     assert a["vigil_cli"] in outputs[2]

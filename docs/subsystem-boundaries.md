@@ -45,6 +45,7 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
   `orchestrator.py` uses those receipts for status/stop, preflight and restore ownership decisions.
 - `src/vigil_cli/client_sessions.py` — live PID/birth-identity bindings, historical starts and bootstrap lock. Shared-config starts reuse the live release without repair; native projects stay independent. Explicit maintenance guards upgrades; historical opens never prove ownership.
 - `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated launchers at session start, and `agent/scripts/assess/lib/config.py:resolve_base_url` mirrors it for `vigil assess`.
+- `src/vigil_cli/config.py:claude_session_model` owns the Claude operator model per offensive track (`CLAUDE_TRACK_MODELS`) and its `VIGIL_CLAUDE_MODEL_<TRACK>` / `claude.model.<track>` overrides; `engagements.py:start_engagement` passes it as `--model=` unless the client tail forwards one.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
   The canonical engagement wizard creates remediation projects.
@@ -66,8 +67,8 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
 - `src/vigil_cli/client_checks.py` owns client prerequisites, bound-workspace/assets and exact-context hook inspection.
   Historical `OBSERVED` events do not attest current builds or backend hydration.
-- `src/vigil_cli/opencode_launch.py` owns the supported OpenCode range, major detection and the per-major operator
-  flags, model/variant mapping and generated-launcher exec for every OpenCode start; callers own their workspaces.
+- `src/vigil_cli/opencode_launch.py` owns the supported OpenCode range, the operator flags, model/variant
+  mapping and generated-launcher exec for every OpenCode start; callers own their workspaces.
 - `src/vigil_cli/client_context.py` discovers install-owned project identity for mode/client-check/assess.
   It supplies session selectors, not application paths or endpoints; `client_checks.py:validate_context_binding` owns validation.
 - `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,

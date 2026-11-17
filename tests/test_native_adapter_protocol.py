@@ -58,6 +58,22 @@ def _zcode_run(script: Path, payload: dict, *, cwd: Path) -> subprocess.Complete
                           env=env, text=True, capture_output=True, timeout=10, check=True)
 
 
+# The OpenCode runtime's session reads, as the plugin context answers them for an operator
+# session with no history; `request(id)` is one session.context event for that session.
+_OPENCODE_PRELUDE = """
+const ctx = {session: {get: async ({sessionID}) => ({id: sessionID, agent: 'operator'}), context: async () => []}};
+const request = sessionID => ({sessionID, agent: 'operator', model: {id: 'model', providerID: 'provider'}, system: []});
+"""
+
+
+def _opencode_run(script: str, binding: Path) -> subprocess.CompletedProcess:
+    """Runs ``script`` with ``module`` (the runtime), ``ctx`` and ``request`` defined."""
+    return subprocess.run(["node", "--input-type=module", "-e", "import {readFileSync} from 'node:fs';"
+        "const module = await import('data:text/javascript;base64,' + readFileSync(process.argv[1]).toString('base64'));"
+        + _OPENCODE_PRELUDE + script, str(OPENCODE)], env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
+        capture_output=True, text=True, timeout=10, check=True)
+
+
 @pytest.mark.parametrize("kind", ["code", "both"])
 def test_zcode_legacy_scope_uses_canonical_mode_helper(tmp_path: Path, kind: str) -> None:
     binding, context = _binding(tmp_path, client="zcode")
@@ -98,49 +114,6 @@ def test_zcode_error_context_matches_native_event(tmp_path: Path, event: str) ->
     assert result.stderr
 
 
-@pytest.mark.parametrize("tool", ["write", "edit"])
-def test_opencode_normalizes_native_file_path_without_losing_input(tmp_path: Path, tool: str) -> None:
-    binding, context = _binding(tmp_path, client="opencode")
-    script = """
-import {readFileSync} from 'node:fs';
-const module = await import('data:text/javascript;base64,' + readFileSync(process.argv[1]).toString('base64'));
-const adapter = await module.VigilAssessmentHooks({client:{}});
-await adapter['tool.execute.after']({tool:process.argv[2],sessionID:'session-1',callID:'call-1',
-  args:{filePath:'/workspace/engagements/acme/findings.md',content:'Acme content',oldString:'old',newString:'new'}},
-  {output:'saved',metadata:{}});
-"""
-    result = subprocess.run(["node", "--input-type=module", "-e", script, str(OPENCODE), tool],
-                            env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
-                            capture_output=True, text=True, timeout=10, check=True)
-    assert result.stdout == ""
-    payload = json.loads((tmp_path / "capture.json").read_text())
-    assert payload["tool_name"] == tool.title()
-    assert payload["tool_input"]["file_path"] == payload["tool_input"]["filePath"]
-    assert payload["tool_input"]["content"] == "Acme content"
-    assert payload["tool_input"]["oldString"] == "old"
-    assert payload["tool_input"]["newString"] == "new"
-    assert payload["cwd"] == context["engagement_dir"]
-
-
-def test_opencode_exit_normalization_preserves_native_payload(tmp_path: Path) -> None:
-    binding, _ = _binding(tmp_path, client="opencode")
-    script = """
-import {readFileSync} from 'node:fs';
-const module=await import('data:text/javascript;base64,'+readFileSync(process.argv[1]).toString('base64'));
-const adapter=await module.VigilAssessmentHooks({client:{}});
-await adapter['tool.execute.after']({tool:'bash',sessionID:'acme-session',callID:'acme-call',args:{command:'printf Acme'}},
- {title:'Acme',output:'Acme failure',metadata:{exit:7,description:'Acme task'},native_extra:{count:2}});
-"""
-    subprocess.run(["node", "--input-type=module", "-e", script, str(OPENCODE)],
-                   env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
-                   capture_output=True, text=True, timeout=10, check=True)
-    payload = json.loads((tmp_path / "capture.json").read_text())
-    assert payload["tool_response"]["exit_code"] == 7
-    assert payload["tool_response"]["metadata"] == {"exit": 7, "description": "Acme task"}
-    assert payload["tool_response"]["native_extra"] == {"count": 2}
-    assert payload["native_tool_name"] == "bash"
-
-
 def test_zcode_health_receipt_identifies_exact_binding(tmp_path: Path) -> None:
     binding, context = _binding(tmp_path, client="zcode")
     result = _zcode_run(_zcode_plugin(tmp_path), {
@@ -157,18 +130,7 @@ def test_zcode_health_receipt_identifies_exact_binding(tmp_path: Path) -> None:
 
 def test_opencode_health_receipt_identifies_exact_binding(tmp_path: Path) -> None:
     binding, context = _binding(tmp_path, client="opencode")
-    script = """
-import {readFileSync} from 'node:fs';
-const module = await import('data:text/javascript;base64,' + readFileSync(process.argv[1]).toString('base64'));
-const client = {session:{messages:async()=>({data:[{info:{role:'assistant',id:'a1',sessionID:'session-1',
-  agent:'operator',time:{created:1},modelID:'model',providerID:'provider'}}]}),
-  get:async()=>({data:{id:'session-1'}})}};
-const adapter = await module.VigilAssessmentHooks({client});
-await adapter['experimental.chat.system.transform']({sessionID:'session-1',model:{id:'model',providerID:'provider'}},{system:[]});
-"""
-    subprocess.run(["node", "--input-type=module", "-e", script, str(OPENCODE)],
-                   env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
-                   capture_output=True, text=True, timeout=10, check=True)
+    _opencode_run("await (await module.VigilAssessmentHooksV2({ctx}))['session.context'](request('session-1'));", binding)
     health = list(Path(context["workspace"]).glob(".vigil-health-*.json"))
     assert len(health) == 1
     receipt = json.loads(health[0].read_text())
@@ -194,11 +156,9 @@ fs.renameSync = (source, target) => {
 syncBuiltinESMExports();
 if (process.argv[2] === 'opencode') {
   const module = await import('data:text/javascript;base64,' + fs.readFileSync(process.argv[1]).toString('base64'));
-  const client = {session:{messages:async()=>({data:[{info:{role:'assistant',id:'a1',sessionID:'session-1',
-    agent:'operator',time:{created:1},modelID:'model',providerID:'provider'}}]}),get:async()=>({data:{id:'session-1'}})}};
-  const adapter = await module.VigilAssessmentHooks({client});
-  for (let attempt=0;attempt<2;attempt++) await adapter['experimental.chat.system.transform'](
-    {sessionID:'session-1',model:{id:'model',providerID:'provider'}},{system:[]});
+""" + _OPENCODE_PRELUDE + """
+  const adapter = await module.VigilAssessmentHooksV2({ctx});
+  for (let attempt=0;attempt<2;attempt++) await adapter['session.context'](request('session-1'));
 } else {
   for(let attempt=0;attempt<2;attempt++) {
     Object.defineProperty(process,'stdin',{value:Readable.from([JSON.stringify({hook_event_name:'SessionStart',
@@ -234,17 +194,7 @@ def test_observations_from_other_binding_do_not_verify_current_binding(tmp_path:
             "cwd": context["workspace"],
         }, cwd=Path(context["workspace"]))
     else:
-        script = """
-import {readFileSync} from 'node:fs';
-const module = await import('data:text/javascript;base64,' + readFileSync(process.argv[1]).toString('base64'));
-const client = {session:{messages:async()=>({data:[{info:{role:'assistant',id:'a1',sessionID:'session-1',
-  agent:'operator',time:{created:1},modelID:'model',providerID:'provider'}}]}),get:async()=>({data:{id:'session-1'}})}};
-const adapter = await module.VigilAssessmentHooks({client});
-await adapter['experimental.chat.system.transform']({sessionID:'session-1',model:{id:'model',providerID:'provider'}},{system:[]});
-"""
-        subprocess.run(["node", "--input-type=module", "-e", script, str(OPENCODE)],
-                       env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
-                       capture_output=True, text=True, timeout=10, check=True)
+        _opencode_run("await (await module.VigilAssessmentHooksV2({ctx}))['session.context'](request('session-1'));", binding)
     receipt = json.loads(health.read_text())
     assert receipt["binding_sha256"] == hashlib.sha256(binding.read_bytes()).hexdigest()
     assert not receipt.get("compact_observed", False)
@@ -254,23 +204,16 @@ await adapter['experimental.chat.system.transform']({sessionID:'session-1',model
 def test_opencode_in_memory_observations_are_scoped_to_exact_binding(tmp_path: Path) -> None:
     binding, context = _binding(tmp_path, client="opencode")
     (Path(context["agent_root"]) / "scripts/hooks/pre-compact.sh").write_text("printf 'Acme context'\n")
-    script = """
-import {readFileSync,writeFileSync} from 'node:fs';
-const module = await import('data:text/javascript;base64,' + readFileSync(process.argv[1]).toString('base64'));
-const client = {session:{messages:async()=>({data:[{info:{role:'assistant',id:'a1',sessionID:'session-1',
-  agent:'operator',time:{created:1},modelID:'model',providerID:'provider'}}]}),get:async()=>({data:{id:'session-1'}})}};
-const adapter = await module.VigilAssessmentHooks({client});
-const request={sessionID:'session-1',model:{id:'model',providerID:'provider'}};
-await adapter['experimental.chat.system.transform'](request,{system:[]});
-await adapter['experimental.session.compacting']({sessionID:'session-1'},{context:[]});
-const binding=JSON.parse(readFileSync(process.env.VIGIL_CLIENT_CONTEXT,'utf8'));
-binding.backend_url='http://127.0.0.1:9';
-writeFileSync(process.env.VIGIL_CLIENT_CONTEXT,JSON.stringify(binding));
-await adapter['experimental.chat.system.transform'](request,{system:[]});
-"""
-    subprocess.run(["node", "--input-type=module", "-e", script, str(OPENCODE)],
-                   env={**os.environ, "VIGIL_CLIENT_CONTEXT": str(binding)},
-                   capture_output=True, text=True, timeout=10, check=True)
+    _opencode_run("""
+const {writeFileSync} = await import('node:fs');
+const adapter = await module.VigilAssessmentHooksV2({ctx});
+await adapter['session.context'](request('session-1'));
+await adapter['session.compaction'](request('session-1'));
+const binding = JSON.parse(readFileSync(process.env.VIGIL_CLIENT_CONTEXT, 'utf8'));
+binding.backend_url = 'http://127.0.0.1:9';
+writeFileSync(process.env.VIGIL_CLIENT_CONTEXT, JSON.stringify(binding));
+await adapter['session.context'](request('session-1'));
+""", binding)
     health = list(Path(context["workspace"]).glob(".vigil-health-*.json"))
     assert len(health) == 1
     receipt = json.loads(health[0].read_text())

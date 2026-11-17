@@ -34,7 +34,7 @@ from assess.lib.parser_boundary import MAX_DEFAULT_PARSER_JOBS
 # --------------------------------------------------------------------------- #
 
 _EXPECTED_LEAF_COUNT = 201
-_EXPECTED_TREE_DIGEST = "92ff2714728233ff40c7dbb5df800be8f2835d0ab27805dddb9db5bd68512768"
+_EXPECTED_TREE_DIGEST = "362cad9d86de69ecbb368e11cc2ad5351bbaf61de461b568bcc756bcfda34d77"
 
 
 def _stable(value: object) -> object:
@@ -191,7 +191,7 @@ _KALI_BESPOKE_VERBS = ("sweep-orphans", "sweep", "tool-help", "gf")
 _KALI_INLINE_VERBS = ("job", "exec", "browser")
 _EXPECTED_CONTRACT_NAME_COUNT = 154
 _EXPECTED_EPILOG_COUNT = 91
-_EXPECTED_CONTRACT_DIGEST = "7e20aad08e239541010fc0ccd2d9e82d14f019d76993ef29aacf1b8e102c0a98"
+_EXPECTED_CONTRACT_DIGEST = "34292268f22a6a5b934b844c12ba40da1b9775fba54df3744d308d019709cb45"
 
 
 def _renderable_contract_names() -> list[str]:
@@ -1072,3 +1072,27 @@ def test_dispatch_code_file_walk_refuses(capsys, monkeypatch, pages: list[object
         capsys.readouterr().err.strip()
         == "Could not fetch code files for queue normalization"
     )
+
+
+# --------------------------------------------------------------------------- #
+# A heartbeat is the most frequent helper call. Building `code-dispatch` reads
+# the standard skip vocabulary, not the contract corpus that renders contracts.
+# --------------------------------------------------------------------------- #
+
+
+def test_code_dispatch_loads_without_the_contract_corpus() -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    scripts = Path(cli.__file__).resolve().parents[1]
+    probe = (
+        "import sys; from assess.commands import code_dispatch, code_classify; "
+        "print('assess.lib.contracts' in sys.modules, 'assess.lib.contract_registry' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=scripts, capture_output=True, text=True, check=True,
+        env={"PYTHONPATH": f"{scripts}{':' + str(scripts.parents[1] / 'src')}", "PATH": "/usr/bin:/bin"},
+    )
+    assert result.stdout.split() == ["False", "False"]

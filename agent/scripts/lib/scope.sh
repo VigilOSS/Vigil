@@ -66,6 +66,11 @@ host_in_scope() {
 command_uses_raw_curl() {
     local command="${1:-}"
 
+    # Every match contains the literal word, so most commands need no grep.
+    case "$command" in
+        *curl*) ;;
+        *) return 1 ;;
+    esac
     printf '%s\n' "$command" | grep -Eq '(^|[[:space:];|&(])(/usr/bin/curl|curl)([[:space:]]|$)'
 }
 

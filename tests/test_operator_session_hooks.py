@@ -12,8 +12,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import tomllib
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -1200,3 +1202,428 @@ def test_post_tool_log_without_native_identity_retains_short_window_dedup(tmp_pa
 
     assert first.returncode == second.returncode == 0
     assert len(_captured(capture)) == 1
+
+
+# Each case: the hook's stdin (a payload gets the engagement as ``cwd``; a string
+# has ``<ENG>`` replaced) and the (agent, title, action, result) handed to
+# `vigil assess log`, one tuple per expected call. Byte truncation, jq's raw and
+# pretty printing, and its failure modes all reach the activity row, so the
+# exact argv is pinned.
+_LONG_UNICODE = "Z" * 281 + "é" * 30
+_POST_TOOL_LOG_PIN_CASES: list[tuple[str, object, list[list[str]]]] = [
+    ("bash_success", {
+        "tool_name": "Bash", "agent_type": "code-vuln-hunter", "tool_use_id": "tu-ok",
+        "tool_input": {"command": "rg -n 'parse' src/acme"},
+        "tool_response": {"stdout": "src/acme/a.py:1:def parse():", "stderr": "", "exitCode": 0},
+    }, [["code-vuln-hunter", "Bash", "bash: rg -n 'parse' src/acme", "src/acme/a.py:1:def parse():"]]),
+    ("bash_nonzero_without_stdout", {
+        "tool_name": "Bash", "tool_use_id": "tu-nz",
+        "tool_input": {"command": "make test"},
+        "tool_response": {"stdout": "", "stderr": "boom", "exitCode": 2},
+    }, [["operator", "Bash", "bash: make test", "exit=2"]]),
+    ("bash_nonzero_with_output", {
+        "tool_name": "Bash", "agent_name": "codex-lane", "tool_use_id": "tu-nz2",
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {"stdout": "1 failed\n\n", "exit_code": 1},
+    }, [["codex-lane", "Bash", "bash: pytest -q", "exit=1 | 1 failed"]]),
+    ("bash_codex_string_response", {
+        "tool_name": "Bash", "tool_use_id": "tu-cx", "client_name": "codex",
+        "tool_input": {"command": "id -u\n\n"},
+        "tool_response": "Exit code: 0\nWall time: 0.1 seconds\nOutput:\n501\n",
+    }, [["operator", "Bash", "bash: id -u", "Exit code: 0\nWall time: 0.1 seconds\nOutput:\n501"]]),
+    ("bash_object_exit_code_and_fallback_text", {
+        "tool_name": "Bash", "tool_use_id": "tu-ob",
+        "tool_input": {"command": "uname -a"},
+        "tool_response": {"return_code": {"signal": 9}, "interrupted": False},
+    }, [["operator", "Bash", "bash: uname -a", "exit={\n  \"signal\": 9\n} | {\"return_code\":{\"signal\":9},\"interrupted\":false}"]]),
+    ("bash_long_unicode_output_is_byte_truncated", {
+        "tool_name": "Bash", "tool_use_id": "tu-lu",
+        "tool_input": {"command": "x" * 230},
+        "tool_response": {"stdout": _LONG_UNICODE, "exitCode": "0"},
+    }, [["operator", "Bash", "bash: " + "x" * 200, "Z" * 281 + "é" * 9 + "\udcc3"]]),
+    ("bash_nul_inside_the_kept_output", {
+        "tool_name": "Bash", "tool_use_id": "tu-nul",
+        "tool_input": {"command": "xxd -r dump"},
+        "tool_response": {"stdout": "a\u0000b", "exitCode": 0},
+    }, [["operator", "Bash", "bash: xxd -r dump", "ab"]]),
+    ("bash_nul_after_the_kept_output", {
+        "tool_name": "Bash", "tool_use_id": "tu-nul2",
+        "tool_input": {"command": "xxd -r dump"},
+        "tool_response": {"stdout": "Q" * 400 + "\u0000", "exitCode": 0},
+    }, [["operator", "Bash", "bash: xxd -r dump", "Q" * 300]]),
+    ("bash_echo_option_command", {
+        "tool_name": "Bash", "tool_use_id": "tu-dash",
+        "tool_input": {"command": "-n"},
+        "tool_response": {"stdout": "-e", "exitCode": 0},
+    }, [["operator", "Bash", "bash: ", "-e"]]),
+    ("bash_in_scope_raw_curl_is_flagged", {
+        "tool_name": "Bash", "tool_use_id": "tu-curl",
+        "tool_input": {"command": "cd x && /usr/bin/curl -sk https://EXAMPLE.com:8443/login"},
+        "tool_response": {"stdout": "", "exitCode": 7},
+    }, [["operator", "Bash", "bash: cd x && /usr/bin/curl -sk https://EXAMPLE.com:8443/login", "VIOLATION: host-side target traffic bypassed 'vigil assess kali'. exit=7"]]),
+    ("bash_out_of_scope_curl_is_not_flagged", {
+        "tool_name": "Bash", "tool_use_id": "tu-curl2",
+        "tool_input": {"command": "curl -s https://api.example.org/x"},
+        "tool_response": {"stdout": "{}", "exitCode": 0},
+    }, [["operator", "Bash", "bash: curl -s https://api.example.org/x", "{}"]]),
+    ("bash_noise_is_skipped", {
+        "tool_name": "Bash", "tool_use_id": "tu-ls", "tool_input": {"command": "ls -la"},
+    }, []),
+    ("bash_non_string_input_is_skipped", {
+        "tool_name": "Bash", "tool_use_id": "tu-str", "tool_input": "rg x",
+    }, []),
+    ("agent_dispatch", {
+        "tool_name": "Agent", "agent_type": "operator", "tool_use_id": "tu-agent",
+        "tool_input": {"subagent_type": "code-vuln-hunter", "description": "Hunt parsers",
+                       "prompt": "P" * 140 + "ü" * 20},
+    }, [["operator", "Dispatch: code-vuln-hunter", "Hunt parsers", "P" * 140 + "ü" * 5]]),
+    ("agent_dispatch_description_only", {
+        "tool_name": "Agent", "tool_use_id": "tu-agent2", "tool_input": {"description": "Map routes"},
+    }, [["operator", "Dispatch: Map routes", "Map routes", ""]]),
+    ("write_inside_engagements", {
+        "tool_name": "Write", "tool_use_id": "tu-w",
+        "tool_input": {"file_path": "/work/engagements/acme/notes.md", "content": "x"},
+    }, [["operator", "Write", "file=engagements/acme/notes.md", ""]]),
+    ("edit_outside_engagements_is_skipped", {
+        "tool_name": "Edit", "tool_use_id": "tu-e", "tool_input": {"file_path": "/work/acme/app.py"},
+    }, []),
+    ("apply_patch", {
+        "tool_name": "apply_patch", "tool_use_id": "tu-patch",
+        "tool_input": {"command": "*** Begin Patch\n*** Update File: src/b.py\n*** Add File: src/a.py\n"
+                                  "*** Update File: src/b.py\n*** Delete File: old.py\n*** End Patch"},
+        "tool_response": {"output": "Success.\nM src/b.py"},
+    }, [["operator", "apply_patch", "files=old.py, src/a.py, src/b.py", "Success.\nM src/b.py"]]),
+    ("mcp_tool_with_object_result", {
+        "tool_name": "mcp__acme__search", "tool_use_id": "tu-mcp",
+        "tool_input": {"query": "parse", "limit": 5, "nested": {"a": [1, 2]}},
+        "tool_response": {"result": {"hits": [{"path": "src/a.py", "line": 1}]}},
+    }, [["operator", "mcp__acme__search", 'mcp args={"query":"parse","limit":5,"nested":{"a":[1,2]}}', "{\n  \"hits\": [\n    {\n      \"path\": \"src/a.py\",\n      \"line\": 1\n    }\n  ]\n}"]]),
+    ("mcp_tool_with_long_args", {
+        "tool_name": "mcp__acme__fetch", "tool_use_id": "tu-mcp2",
+        "tool_input": {"blob": "q" * 290 + "ß" * 20}, "tool_response": [{"type": "text", "text": "ok"}],
+    }, [["operator", "mcp__acme__fetch", 'mcp args={"blob":"' + "q" * 290 + "\udcc3",
+      '[{"type":"text","text":"ok"}]']]),
+    ("read_is_not_logged", {
+        "tool_name": "Read", "tool_use_id": "tu-read", "tool_input": {"file_path": "/work/x"},
+    }, []),
+    ("two_json_documents", '{"tool_name":"Bash","cwd":"<ENG>","tool_input":{"command":"rg a"}}'
+                           '{"tool_name":"Bash","cwd":"<ENG>","tool_input":{"command":"rg b"}}', []),
+    # The ignored-tool shortcut reads tool_name before jq; these shapes must reach jq unchanged.
+    ("nested_tool_name_key_does_not_hide_the_call", {
+        "tool_input": {"command": "rg acme", "tool_name": "Read"}, "tool_name": "Bash", "tool_use_id": "tu-nest",
+    }, [["operator", "Bash", "bash: rg acme", ""]]),
+    ("tool_name_quoted_inside_a_command", {
+        "tool_name": "Bash", "tool_use_id": "tu-quoted", "tool_input": {"command": 'rg \'"tool_name": "Read"\''},
+    }, [["operator", "Bash", 'bash: rg \'"tool_name": "Read"\'', ""]]),
+    ("escaped_ignored_tool_name", '{"tool_name":"Re\\u0061d","cwd":"<ENG>","tool_use_id":"tu-esc"}', []),
+    ("escaped_logged_tool_name",
+     '{"tool_name":"B\\u0061sh","cwd":"<ENG>","tool_use_id":"tu-esc2","tool_input":{"command":"rg q"}}',
+     [["operator", "Bash", "bash: rg q", ""]]),
+    ("spaced_ignored_tool_name", '{"tool_name" :\n "Grep","cwd":"<ENG>","tool_use_id":"tu-sp"}', []),
+    ("spaced_logged_tool_name", '{"tool_name" : "Agent","cwd":"<ENG>","tool_use_id":"tu-sp2","tool_input":{"description":"d"}}',
+     [["operator", "Dispatch: d", "d", ""]]),
+    ("duplicate_tool_name_keys_take_the_last",
+     '{"tool_name":"Read","tool_name":"Bash","cwd":"<ENG>","tool_use_id":"tu-dup","tool_input":{"command":"rg dup"}}',
+     [["operator", "Bash", "bash: rg dup", ""]]),
+    ("non_string_tool_name_is_skipped", {"tool_name": 5, "tool_use_id": "tu-num"}, []),
+    ("trailing_garbage_after_the_payload",
+     '{"tool_name":"Agent","cwd":"<ENG>","tool_use_id":"tu-tg","tool_input":{"description":"d"}} xx', [["operator\noperator", "Dispatch: d", "d", ""]]),
+]
+
+
+@pytest.mark.parametrize("jq_flavor", ["installed", "without_raw_output0"])
+@pytest.mark.parametrize(
+    ("stdin", "expected"),
+    [pytest.param(stdin, expected, id=name) for name, stdin, expected in _POST_TOOL_LOG_PIN_CASES],
+)
+def test_post_tool_log_hands_the_logger_the_exact_activity_fields(
+    tmp_path: Path, stdin: object, expected: list[list[str]], jq_flavor: str
+) -> None:
+    """The fields reaching `vigil assess log` are pinned for every tool shape.
+
+    The second flavor models a jq without ``--raw-output0`` (jq 1.6), which must
+    yield the same rows.
+    """
+    engagement_dir = _engagement(tmp_path)
+    (engagement_dir / "scope.json").write_text(json.dumps({
+        "status": "in_progress", "hostname": "example.com", "scope": ["example.com"],
+    }), encoding="utf-8")
+    capture = tmp_path / "capture.jsonl"
+    bin_dir = tmp_path / "bin"
+    _fake_vigil(bin_dir, capture)
+    if jq_flavor == "without_raw_output0":
+        real_jq = shutil.which("jq")
+        assert real_jq
+        jq = bin_dir / "jq"
+        jq.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do [ "$arg" = --raw-output0 ] && '
+            '{ echo "jq: Unknown arguments: $arg" >&2; exit 2; }; done\n'
+            f'exec {shlex.quote(real_jq)} "$@"\n',
+            encoding="utf-8",
+        )
+        jq.chmod(0o755)
+    text = (
+        stdin.replace("<ENG>", str(engagement_dir)) if isinstance(stdin, str)
+        else json.dumps({**stdin, "cwd": str(engagement_dir)})
+    )
+
+    result = _run_hook(
+        POST_TOOL_LOG, None, stdin=text, cwd=engagement_dir, env=_session_end_env(bin_dir)
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    calls = _captured(capture)
+    assert [call["argv"][:5] for call in calls] == [
+        ["assess", "--engagement-dir", str(engagement_dir), "log", "--actor-kind"]
+    ] * len(expected)
+    assert [call["argv"][5:] for call in calls] == [["hook", "--", *fields] for fields in expected]
+
+
+def test_post_tool_log_claims_non_ascii_native_identities_by_their_compact_json(
+    tmp_path: Path,
+) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+    payload = {**_native_log_payload(engagement_dir), "tool_use_id": "tü-✓ \"q\"\t1"}
+    identity = json.dumps(
+        ["opencode", "session-1", payload["tool_use_id"]], separators=(",", ":"), ensure_ascii=False
+    )
+    claim = engagement_dir / f".hook_tool_use_{hashlib.sha256(identity.encode()).hexdigest()}"
+
+    result = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=_session_end_env(tmp_path / "bin"))
+
+    assert result.returncode == 0
+    assert len(_captured(capture)) == 1
+    assert claim.is_file()
+
+
+def test_post_tool_log_reads_the_payload_with_one_jq_process(tmp_path: Path) -> None:
+    """The hook runs after every tool call; its payload fields come from one jq read.
+
+    The second jq process reads scope.json's status.
+    """
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    bin_dir = tmp_path / "bin"
+    _fake_vigil(bin_dir, capture)
+    real_jq = shutil.which("jq")
+    assert real_jq
+    jq_calls = tmp_path / "jq-calls"
+    jq = bin_dir / "jq"
+    jq.write_text(
+        f'#!/bin/sh\necho x >> {shlex.quote(str(jq_calls))}\nexec {shlex.quote(real_jq)} "$@"\n',
+        encoding="utf-8",
+    )
+    jq.chmod(0o755)
+
+    result = _run_hook(
+        POST_TOOL_LOG, {**_BASH_PAYLOAD, "cwd": str(engagement_dir)},
+        cwd=engagement_dir, env=_session_end_env(bin_dir),
+    )
+
+    assert result.returncode == 0
+    assert len(_captured(capture)) == 1
+    assert len(jq_calls.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def _counting_jq(bin_dir: Path, calls: Path) -> None:
+    real_jq = shutil.which("jq")
+    assert real_jq
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    jq = bin_dir / "jq"
+    jq.write_text(f'#!/bin/sh\necho x >> {shlex.quote(str(calls))}\nexec {shlex.quote(real_jq)} "$@"\n', encoding="utf-8")
+    jq.chmod(0o755)
+
+
+@pytest.mark.parametrize("tool", ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite", "Skill"])
+def test_post_tool_log_settles_an_ignored_tool_before_reading_the_payload(tmp_path: Path, tool: str) -> None:
+    """An ignored tool never yields a row, so the hook neither runs jq nor claims the call."""
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    bin_dir = tmp_path / "bin"
+    _fake_vigil(bin_dir, capture)
+    jq_calls = tmp_path / "jq-calls"
+    _counting_jq(bin_dir, jq_calls)
+
+    result = _run_hook(
+        POST_TOOL_LOG,
+        {"tool_name": tool, "tool_use_id": "tu-ignored", "session_id": "s", "client_name": "opencode",
+         "tool_input": {"file_path": "/work/engagements/acme/notes.md", "command": "nmap acme.example"},
+         "cwd": str(engagement_dir)},
+        cwd=engagement_dir, env=_session_end_env(bin_dir),
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert _captured(capture) == []
+    assert not jq_calls.exists()
+    assert not list(engagement_dir.glob(".hook_tool_use_*"))
+
+
+@pytest.mark.parametrize(("occurred_at", "forwarded"), [
+    *[(value, value) for value in ("2026-11-16T10:00:00.123Z", "2026-11-16T10:00:00+00:00", "yesterday",
+                                   "2026-11-16T10:00:00.123Z --actor-kind operator", "-n", "Z" * 65, "Z" * 4096)],
+    ("", ""), ("Z" * 4097, ""), (1794928482, ""), (None, ""),
+])
+def test_post_tool_log_dates_the_row_by_the_calls_finish(tmp_path: Path, occurred_at: object, forwarded: str) -> None:
+    """A queued native logger names when the call finished; `vigil assess log` alone judges the value.
+
+    It travels as one ``--occurred-at=`` word, so an option-shaped value stays that flag's value. Only a
+    string is passed, and only one that keeps the logger's argv small."""
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+
+    result = _run_hook(
+        POST_TOOL_LOG, {**_native_log_payload(engagement_dir), "occurred_at": occurred_at},
+        cwd=engagement_dir, env=_session_end_env(tmp_path / "bin"),
+    )
+
+    assert result.returncode == 0
+    (call,) = _captured(capture)
+    assert call["argv"][5:] == ["hook", *([f"--occurred-at={forwarded}"] if forwarded else []),
+                                "--", "operator", "Bash", "bash: whoami", "operator"]
+
+
+def _recording_vigil(bin_dir: Path, capture: Path) -> None:
+    """A `vigil` that runs the real `vigil assess log` and records the payload it posts.
+
+    Only the backend is replaced, so a test sees the row `log` writes, or that it wrote none."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    executable = bin_dir / "vigil"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"sys.path[:0] = [{str(REPO_ROOT / 'agent' / 'scripts')!r}, {str(REPO_ROOT / 'src')!r}]\n"
+        "from assess import cli\n"
+        "from assess.commands import log_entry\n"
+        "from assess.lib import config\n"
+        "class Recorder:\n"
+        "    def __init__(self, *_args): pass\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *_exc): return False\n"
+        "    def post_engagement(self, endpoint, payload):\n"
+        f"        with open({str(capture)!r}, 'a', encoding='utf-8') as handle:\n"
+        "            handle.write(json.dumps(payload) + '\\n')\n"
+        "        return {**payload, 'id': 1}\n"
+        "    def post_event(self, _payload): return None\n"
+        "log_entry.AssessmentClient = Recorder\n"
+        "config._verify_backend = lambda _cfg: None\n"
+        "cli.main(sys.argv[2:])\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+
+@pytest.mark.parametrize("occurred_at", [
+    "2026-13-45T25:61:61Z", "2026-11-16T10:00:00", "yesterday", "-n", "2999-01-01T00:00:00Z",
+    "2026-04-17T12:00:00." + "1" * 40 + "+00:00",
+])
+def test_post_tool_log_records_the_row_when_its_finish_time_is_unusable(tmp_path: Path, occurred_at: str) -> None:
+    """The row is still written, dated by the backend when it records it."""
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _recording_vigil(tmp_path / "bin", capture)
+
+    result = _run_hook(
+        POST_TOOL_LOG, {**_native_log_payload(engagement_dir), "occurred_at": occurred_at},
+        cwd=engagement_dir, env=_session_end_env(tmp_path / "bin", ORCHESTRATOR_BASE_URL="http://127.0.0.1:9"),
+    )
+
+    assert result.returncode == 0
+    assert _captured(capture) == [{"actor_kind": "hook", "actor_name": "operator", "title": "Bash",
+                                   "action": "bash: whoami", "result": "operator"}]
+    assert list(engagement_dir.glob(".hook_tool_use_*"))
+
+
+def test_post_tool_log_records_the_row_at_its_finish_time(tmp_path: Path) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _recording_vigil(tmp_path / "bin", capture)
+
+    result = _run_hook(
+        POST_TOOL_LOG, {**_native_log_payload(engagement_dir), "occurred_at": "2026-11-16T10:00:00.123Z"},
+        cwd=engagement_dir, env=_session_end_env(tmp_path / "bin", ORCHESTRATOR_BASE_URL="http://127.0.0.1:9"),
+    )
+
+    assert result.returncode == 0
+    assert _captured(capture) == [{"actor_kind": "hook", "actor_name": "operator", "title": "Bash",
+                                   "action": "bash: whoami", "result": "operator",
+                                   "occurred_at": "2026-11-16T10:00:00.123Z"}]
+
+
+def _parsing_vigil(bin_dir: Path, capture: Path) -> None:
+    """A `vigil` that parses its argv with the real `vigil assess log` parser.
+
+    It records the fields `log` would write, or the parser's refusal, so a test
+    sees what reaches the activity row rather than the raw argv.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    executable = bin_dir / "vigil"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import contextlib, io, json, sys\n"
+        f"sys.path[:0] = [{str(REPO_ROOT / 'agent' / 'scripts')!r}, {str(REPO_ROOT / 'src')!r}]\n"
+        "from assess import cli\n"
+        "argv = cli._hoist_root_flags(sys.argv[2:])\n"
+        "row = {}\n"
+        "try:\n"
+        "    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):\n"
+        "        args = cli._build_parser('log', argv).parse_args(argv)\n"
+        "    row = {key: getattr(args, key, None) for key in\n"
+        "           ('engagement_dir', 'eng_dir', 'actor_kind', 'agent', 'title', 'action', 'result')}\n"
+        "except SystemExit as refusal:\n"
+        "    row = {'refused': refusal.code}\n"
+        f"with open({str(capture)!r}, 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(row) + '\\n')\n"
+        "sys.exit(0 if 'refused' not in row else 2)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("payload", "fields"),
+    [
+        pytest.param(
+            {"tool_name": "Bash", "tool_input": {"command": "rg -c x"},
+             "tool_response": {"stdout": "-n", "exitCode": 0}},
+            ("operator", "Bash", "bash: rg -c x", "-n"),
+            id="bash_output_shaped_like_an_option",
+        ),
+        pytest.param(
+            {"tool_name": "Bash", "tool_input": {"command": "printf -- --help"},
+             "tool_response": {"stdout": "--help", "exitCode": 0}},
+            ("operator", "Bash", "bash: printf -- --help", "--help"),
+            id="bash_output_shaped_like_help",
+        ),
+        pytest.param(
+            {"tool_name": "Agent", "agent_type": "-x",
+             "tool_input": {"subagent_type": "recon-specialist", "description": "--engagement-dir",
+                            "prompt": "--actor-kind"}},
+            ("-x", "Dispatch: recon-specialist", "--engagement-dir", "--actor-kind"),
+            id="agent_fields_shaped_like_root_flags",
+        ),
+    ],
+)
+def test_post_tool_log_rows_survive_option_shaped_values(
+    tmp_path: Path, payload: dict, fields: tuple[str, str, str, str]
+) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _parsing_vigil(tmp_path / "bin", capture)
+
+    result = _run_hook(
+        POST_TOOL_LOG, {**payload, "tool_use_id": "tu-dash", "cwd": str(engagement_dir)},
+        cwd=engagement_dir, env=_session_end_env(tmp_path / "bin"),
+    )
+
+    assert result.returncode == 0
+    agent, title, action, outcome = fields
+    assert _captured(capture) == [{
+        "engagement_dir": str(engagement_dir), "eng_dir": None, "actor_kind": "hook",
+        "agent": agent, "title": title, "action": action, "result": outcome,
+    }]
