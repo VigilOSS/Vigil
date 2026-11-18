@@ -196,6 +196,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry auth and draft uploads.
 - `src/vigil_cli/restart_manifest.py:consumer_states` owns install invalidation; `backend_state` supplies remediation verdicts.
   Presenters consume these rows; see the maintainer freshness recipe.
+- `src/vigil_cli/update.py` owns `vigil update`: verified release-wheel install, re-exec into the new CLI,
+  and restarts of running services that `consumer_states` reports stale.
 - `src/vigil_cli/install_manifest.py` owns editable application input digests;
   `src/vigil_cli/install_fs.py` owns pinned/no-follow workspace and cache operations.
 - `src/vigil_cli/assessment_clients.py` owns immutable native-client workspace bindings,

@@ -76,6 +76,7 @@ _COMMAND_TREE = {
         "-h|--help", "--engagement=", "--select", "--no-build", "--json", "--runtime-restart-timeout=",
         "--yes-restart-runtime", "--no-restart-runtime",
     ],
+    "update": ["-h|--help", "--release=", "--no-restart"],
     "logs": ["-h|--help", "target {orchestrator,runtime,mitmproxy,oob,all}", "--follow", "--lines="],
     "config": ["-h|--help"],
     "config path": ["-h|--help"],

@@ -100,6 +100,8 @@ uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.11
 vigil install
 ```
 
+Later, `vigil update` installs the newest release and restarts the services it left stale.
+
 Install and sign in to an agent client: **Claude Code, Codex, OpenCode, ZCode, Goose, Kimi,
 or Pi**. Setup differences are in [agent clients](docs/agent-clients.md), and provider limits
 on security testing are in [models and access](docs/model-access.md). ZCode desktop has extra

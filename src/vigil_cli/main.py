@@ -168,6 +168,7 @@ if TYPE_CHECKING or _loads_operator_commands(sys.argv):
     from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime, warn_if_local_hosts_need_restart
     from .status import collect_doctor_checks, collect_status, print_doctor, print_status
     from .up import UpOptions, run_up
+    from .update import UpdateOptions, install_newest_release, restart_stale_services
 
     _OPERATOR_COMMANDS_LOADED = True
 else:
@@ -524,6 +525,12 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     up_p.add_argument("--runtime-restart-timeout", type=int, default=10)
     up_p.add_argument("--yes-restart-runtime", action="store_true")
     up_p.add_argument("--no-restart-runtime", action="store_true")
+    update_p = sub.add_parser(
+        "update",
+        help="Install the newest release, reconcile the workspace, and restart stale running services",
+    )
+    update_p.add_argument("--release", metavar="VERSION", help="Install this release instead of the latest")
+    update_p.add_argument("--no-restart", action="store_true", help="Report stale services instead of restarting them")
     logs_p = sub.add_parser("logs")
     logs_p.add_argument("target", choices=["orchestrator", "runtime", "mitmproxy", "oob", "all"])
     logs_p.add_argument("--follow", action="store_true")
@@ -1404,7 +1411,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
             client_check_p.error("choose --client opencode or --client zcode outside a bound native client project")
         if args.mode is None and args.key is None and os.environ.get("VIGIL_CLIENT_CONTEXT"):
             args.mode = project_mode
-    sync_command = args.command in {"install", "up"}
+    sync_command = args.command in {"install", "up", "update"}
     install_value = getattr(args, "install_dir", None) or args.root
     install_root = (
         resolve_install_root(install_value, preserve_path=True)
@@ -1439,6 +1446,28 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
             _print_install_dry_run(result)
         else:
             _print_post_install(result)
+    elif args.command == "update":
+        if args.source:
+            raise SystemExit("`vigil update` installs a release; run `vigil --source <checkout> install` for a checkout.")
+        install_newest_release(
+            UpdateOptions(
+                root_argv=("--root", str(install_root)) if args.root else (),
+                version=args.release,
+                restart=not args.no_restart,
+            ),
+            running_version=_cli_version(),
+        )
+        result = install_from_source(
+            InstallOptions(
+                source_root=resolve_source_root(None, install_root=install_root, preserve_path=True),
+                install_root=install_root,
+                render_client_trees=True,
+            )
+        )
+        _record_default_workspace(result.install_root, make_default=False)
+        if not args.no_restart:
+            restart_stale_services(result.install_root)
+        _print_post_install(result)
     elif args.command == "doctor":
         host_tools = setup_host_tools(install=args.install_host_tools, dry_run=args.dry_run) if args.install_host_tools or args.dry_run else None
         checks = collect_doctor_checks(install_root, runner=docker_run_command)

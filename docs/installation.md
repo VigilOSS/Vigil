@@ -74,6 +74,22 @@ of silently replacing the release image with a different build.
 
 ## Upgrade
 
+`vigil update` upgrades in one step. It downloads the latest release wheel, checks it against the
+SHA256 digest GitHub publishes for it, installs it with `uv tool install --force`, and runs the new
+CLI. That CLI reconciles the workspace as `vigil install` does, then restarts each running service
+that is stale: the backend, the Kali runtime (in-flight `vigil assess kali` jobs stop), and the
+mitmproxy container. Stopped services pick up the release when they next start. The closing summary
+lists anything left to do, such as open client sessions.
+
+- `--release <version>` installs that release instead of the latest, including an older one.
+- `--no-restart` installs and reconciles, then lists stale services instead of restarting them.
+- `vigil --root <path> update` reconciles that workspace.
+
+A CLI installed with `--editable` from a checkout is never replaced: update the checkout with your
+VCS, then `vigil update` reconciles the workspace and restarts stale services from it.
+
+To upgrade by hand:
+
 1. Install the next release wheel: `uv tool install --force --from <wheel-url> vigil`.
 2. Run `vigil install` to reconcile workspace metadata. Generated client files are preserved;
    explicit maintenance flags repair them.
