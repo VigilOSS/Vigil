@@ -5,6 +5,16 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.12.0] - 2026-11-18
+
+### Added
+
+- `vigil update` installs the latest release wheel after checking its published SHA256 digest,
+  reconciles the workspace, and restarts each running service that is stale: the backend, the
+  Kali runtime and the mitmproxy container. `--release` installs a specific release;
+  `--no-restart` lists stale services instead of restarting them. A CLI installed from a source
+  checkout is not replaced.
+
 ## [2.11.0] - 2026-11-17
 
 ### Changed
