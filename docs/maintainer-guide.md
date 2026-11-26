@@ -332,7 +332,8 @@ initialization provenance; it is not the release identity of an already-running 
 `application.py` validates the exact bundle inventory and materializes immutable version/digest
 cache paths. After validation it compiles the release's `cli` and `agent/scripts` once per
 interpreter to checked-hash bytecode in `__pycache__`, which validation ignores, in a detached
-background process that retries a failed compile after ten minutes. Do not delete retained
+background process that retries a failed compile after ten minutes. When a session selects an
+explicit bundle root, only that bundle’s own CLI starts the compiler. Do not delete retained
 releases on upgrade: backend processes and client helpers may still use them. Official client
 starts serialize shared-file repair and PID/birth-identity receipts through `client_sessions.py`;
 concurrent shared-config starts reuse the live release without repair.

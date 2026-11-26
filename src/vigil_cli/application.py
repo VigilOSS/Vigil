@@ -364,7 +364,10 @@ def resolve_application_root(
             raise SystemExit(f"Invalid Vigil application directory: {path}")
         if (path / "bundle.json").exists():
             validate_bundle(path, materialized=True)
-            _compile_release_bytecode(path)
+            # A session can pin another release. Its own CLI owns the format of
+            # cache files that its bundle validator will encounter on reuse.
+            if Path(__file__).resolve() == path.resolve() / "cli/vigil_cli/application.py":
+                _compile_release_bytecode(path)
         return path if preserve_path else path.resolve()
     module = Path(__file__).resolve()
     bundle = module.parent / "_bundle"

@@ -390,6 +390,29 @@ def test_validated_release_compiles_checked_hash_bytecode_once(tmp_path, monkeyp
     assert launched == []
 
 
+def test_explicit_release_leaves_bytecode_to_its_own_cli(tmp_path, monkeypatch):
+    bundle, _ = _python_release(tmp_path, monkeypatch, {"cli/vigil_cli/application.py": b""})
+    root = application.materialize_bundle(bundle)
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(root))
+    with _recorded_launches() as launched:
+        assert application.resolve_application_root() == root
+        assert launched == []
+
+    monkeypatch.setattr(application, "__file__", str(root / "cli/vigil_cli/application.py"))
+    assert application.resolve_application_root() == root
+    _compiled(root)
+    assert application.resolve_application_root() == root
+
+
+def test_foreign_session_pin_refuses_a_mismatched_packaged_prompt(tmp_path, monkeypatch):
+    bundle, _ = _bundle(tmp_path, monkeypatch)
+    root = application.materialize_bundle(bundle)
+    monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(root))
+    (root / "agent/AGENTS.md").write_text("different release prompt\n")
+    with pytest.raises(ValueError, match="Application bundle content mismatch: agent/AGENTS.md"):
+        application.resolve_application_root()
+
+
 def test_tampered_source_never_runs_its_stale_bytecode(tmp_path, monkeypatch):
     _python_release(tmp_path, monkeypatch)
     root = application.resolve_application_root()
