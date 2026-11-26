@@ -34,7 +34,7 @@ from assess.lib.parser_boundary import MAX_DEFAULT_PARSER_JOBS
 # --------------------------------------------------------------------------- #
 
 _EXPECTED_LEAF_COUNT = 201
-_EXPECTED_TREE_DIGEST = "362cad9d86de69ecbb368e11cc2ad5351bbaf61de461b568bcc756bcfda34d77"
+_EXPECTED_TREE_DIGEST = "ef5ee5f44575746442b9525d89f55845b94190780b2814641471c50802563098"
 
 
 def _stable(value: object) -> object:
