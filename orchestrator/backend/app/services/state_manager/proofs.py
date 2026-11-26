@@ -166,19 +166,6 @@ def _serialize_receipt(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def _command_output_relative_path(root: Path, path_value: object) -> str | None:
-    value = str(path_value or "").strip()
-    if not value:
-        return ""
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    try:
-        return candidate.resolve(strict=False).relative_to(root).as_posix()
-    except (OSError, ValueError):
-        return None
-
-
 def _command_output_evidence_healths(
     connection: sqlite3.Connection,
     engagement_id: int,
@@ -211,7 +198,7 @@ def _command_output_evidence_healths(
     ).fetchall()
     artifacts = connection.execute(
         f"""
-        SELECT producer_command_run_id, relative_path, kind, present,
+        SELECT producer_command_run_id, relative_path, present,
                integrity_status, sha256, size_bytes,
                verified_device, verified_inode
         FROM assessment_artifacts
@@ -244,15 +231,10 @@ def _command_output_evidence_healths(
 
         stdout_bytes = int(command["stdout_bytes"] or 0)
         stderr_bytes = int(command["stderr_bytes"] or 0)
-        if retention_status == "empty":
-            if (
-                stdout_bytes != 0
-                or stderr_bytes != 0
-                or bool(command["stdout_preview"])
-                or bool(command["stderr_preview"])
-            ):
-                continue
-            result[command_id] = "healthy"
+        if retention_status == "empty" and (
+            stdout_bytes != 0 or stderr_bytes != 0
+            or command["stdout_preview"] or command["stderr_preview"]
+        ):
             continue
         if retention_status == "suppressed":
             result[command_id] = "healthy"
@@ -264,23 +246,17 @@ def _command_output_evidence_healths(
         for stream in ("stdout", "stderr"):
             byte_count = int(command[f"{stream}_bytes"] or 0)
             expected_sha256 = str(command[f"{stream}_sha256"] or "")
-            artifact_ref = str(command[f"{stream}_artifact_ref"] or "")
-            output_path = (
-                ""
-                if str(command["route"] or "") == "host_exec"
-                else str(command[f"{stream}_path"] or "")
-            )
-            retained_path = artifact_ref or output_path
-            if retained_path:
-                relative_path = _command_output_relative_path(root, retained_path)
-                if relative_path is None:
-                    artifact_health.append("stale")
-                    continue
+            relative_path = artifact_index.retained_stream_relative_path(root, command, stream)
+            if relative_path is None:
+                artifact_health.append("stale")
+                continue
+            if relative_path:
+                # Registration may relabel a stream. The producer and the path
+                # recorded on this command identify its artifact across relabels.
                 matching = [
                     artifact
                     for artifact in command_artifacts
-                    if artifact["kind"] == "command-run-output"
-                    and artifact["relative_path"] == relative_path
+                    if artifact["relative_path"] == relative_path
                 ]
                 if not matching:
                     artifact_health.append("missing")
@@ -291,25 +267,19 @@ def _command_output_evidence_healths(
                     or not bool(artifact["present"])
                 ):
                     artifact_health.append("missing")
-                elif not expected_sha256 and byte_count == 0:
-                    # A stream measured at ZERO bytes records no digest, because
-                    # there are no bytes to digest. That empty digest is the
-                    # measurement, not the absence of one — reading it as
-                    # unmeasured left every real audited run permanently stale
-                    # (almost all of them write nothing to stderr). What tells
-                    # the two apart is output_retention_status, filtered above,
-                    # NOT the zero itself: only 'artifact'/'retained' reach here,
-                    # and a caller that could not read its spill lands
-                    # 'unmeasured'/'partially_measured' instead. The retained
-                    # file still has to agree: bytes that appeared after the
-                    # measurement are a different fact.
-                    artifact_health.append(
-                        "healthy"
-                        if int(artifact["size_bytes"] or 0) == 0
-                        else "stale"
-                    )
-                elif (
-                    not expected_sha256
+                    continue
+                # Command measurements encode zero bytes with an empty digest.
+                # The generic artifact index hashes empty files, while verified
+                # descriptor snapshots use the same convention as the command.
+                if (
+                    byte_count == 0
+                    and not expected_sha256
+                    and artifact["verified_device"] is None
+                ):
+                    expected_sha256 = hashlib.sha256(b"").hexdigest()
+                if (
+                    byte_count != int(artifact["size_bytes"] or 0)
+                    or (byte_count > 0 and not expected_sha256)
                     or str(artifact["integrity_status"] or "") == "mismatch"
                     or str(artifact["sha256"] or "") != expected_sha256
                 ):
@@ -319,7 +289,7 @@ def _command_output_evidence_healths(
                         artifact_index.registered_snapshot_evidence_health(
                             root,
                             relative_path,
-                            expected_size=int(artifact["size_bytes"] or 0),
+                            expected_size=byte_count,
                             expected_sha256=expected_sha256,
                             verified_device=(
                                 int(artifact["verified_device"])

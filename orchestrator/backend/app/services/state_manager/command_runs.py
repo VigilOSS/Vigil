@@ -1900,6 +1900,7 @@ def record_command_run(
         _common._register_artifact_reference(
             engagement.id,
             str(artifact_ref or ""),
+            command_capture=True,
             kind="command-run-output",
             producer_command_run_id=int(serialized["id"]),
             producer_agent_role=agent_name,
@@ -2713,6 +2714,7 @@ def finalize_command_run(
                     _common._register_artifact_reference(
                         engagement.id,
                         str(output_path or ""),
+                        command_capture=True,
                         kind="command-run-output",
                         producer_command_run_id=int(serialized["id"]),
                         producer_agent_role=str(serialized.get("agent_name") or ""),

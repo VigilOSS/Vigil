@@ -68,6 +68,39 @@ def _normalize_relative_path(root: Path, path_value: str) -> str:
     return relative.as_posix()
 
 
+def retained_stream_relative_path(root: Path, command, stream: str) -> str | None:
+    """Return the stored stream's local path, empty if absent, None if unsafe."""
+    path = command[f"{stream}_artifact_ref"]
+    if not path and command["route"] != "host_exec":
+        path = command[f"{stream}_path"]
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    if "\x00" in value:
+        return None
+    try:
+        candidate = Path(value).expanduser()
+    except RuntimeError:
+        return None
+    if candidate.is_absolute():
+        prefix = root
+        if not candidate.is_relative_to(root):
+            # A persisted absolute path may spell the root through a platform
+            # alias (/var on macOS). Resolve only up to the root. Resolving a
+            # symlink below it would substitute a different registered stream.
+            try:
+                prefix = next(
+                    parent for parent in reversed(candidate.parents)
+                    if parent.resolve(strict=False) == root
+                )
+            except (OSError, ValueError, RuntimeError, StopIteration):
+                return None
+        candidate = candidate.relative_to(prefix)
+    if ".." in candidate.parts:
+        return None
+    return candidate.as_posix()
+
+
 def _open_registered_artifact(root: Path | int, relative_path: str) -> int | None:
     """Open one registered path without following any component symlink."""
     parts = Path(relative_path).parts
@@ -392,6 +425,7 @@ def _store_artifact(
     verified_device: int | None = None,
     verified_inode: int | None = None,
     integrity_status: str = "unverified",
+    command_capture: bool = False,
 ) -> dict[str, Any]:
     kind_value = _guess_kind(relative_path, kind)
     media_type_value = _media_type(relative_path, media_type)
@@ -407,6 +441,33 @@ def _store_artifact(
             "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
             (engagement_id, relative_path),
         ).fetchone()
+        if (
+            not command_capture
+            and producer_command_run_id is not None
+            and previous is not None
+            and previous["verified_device"] is None
+            and previous["producer_command_run_id"] is not None
+            and previous["producer_command_run_id"] != producer_command_run_id
+        ):
+            original = connection.execute(
+                """
+                SELECT e.engagement_root, c.route, c.stdout_artifact_ref, c.stderr_artifact_ref,
+                       c.stdout_path, c.stderr_path
+                FROM assessment_command_runs c JOIN engagements e ON e.id = c.engagement_id
+                WHERE c.engagement_id = ? AND c.id = ?
+                """,
+                (engagement_id, previous["producer_command_run_id"]),
+            ).fetchone()
+            if original is not None:
+                root = Path(original["engagement_root"]).expanduser().resolve()
+                if any(
+                    retained_stream_relative_path(root, original, stream) == relative_path
+                    for stream in ("stdout", "stderr")
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="only command capture can reassign a retained stream's producer",
+                    )
         # Mirrors the upsert's byte CASE: a missing file, or an unverified write
         # over verified command output, keeps the stored bytes.
         bytes_kept = not file_data["present"] or (
@@ -717,6 +778,7 @@ def register_artifact(
     related_surface_id: int | None = None,
     related_request_variant_id: int | None = None,
     recorded_producers: frozenset[str] | None = None,
+    command_capture: bool = False,
 ) -> dict[str, Any]:
     _engagement, root = _engagement_root(engagement_id)
     relative_path = _normalize_relative_path(root, path)
@@ -763,6 +825,7 @@ def register_artifact(
     return _store_artifact(
         engagement_id,
         relative_path=relative_path,
+        command_capture=command_capture,
         kind=kind,
         media_type=media_type,
         file_data=file_data,
@@ -1240,6 +1303,7 @@ def register_verified_command_output(
     return _store_artifact(
         engagement_id,
         relative_path=normalized,
+        command_capture=True,
         kind="command-run-output",
         media_type=media_type_value,
         file_data={

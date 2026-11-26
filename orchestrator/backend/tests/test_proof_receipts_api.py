@@ -277,7 +277,9 @@ def test_legacy_derivative_receipt_keeps_migration_provenance_without_controls(
     }
 
 
-def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, dict]:
+def _verified_command_finding(
+    client, *, slug: str, stdout: str, stderr: str = "",
+) -> tuple[dict, dict]:
     _finding(
         client,
         slug,
@@ -297,7 +299,7 @@ def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, 
             "phase": "verify",
             **_COMMAND_RUN_META,
             "stdout": stdout,
-            "stderr": "",
+            "stderr": stderr,
             "run_uuid": f"command-{slug.lower()}",
         },
     )
@@ -875,6 +877,120 @@ def test_command_receipt_and_readiness_degrade_when_output_artifact_is_missing(
     )
 
 
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_relabelled_command_stream_retains_measured_proof(client, isolate_settings, stream):
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(
+        client, slug="VA-913", stdout="A" * 70_000, stderr="B" * 70_000,
+    )
+    path = Path(command[f"{stream}_artifact_ref"])
+    endpoint = f"{BASE}/proof-receipts/{receipt['id']}"
+
+    def register_output():
+        response = client.post(
+            f"{BASE}/artifacts", json={"path": str(path), "kind": "evidence"}
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    artifact = register_output()
+    assert artifact["kind"] == "evidence"
+    assert client.get(endpoint).json()["evidence_health"] == "healthy"
+    finding = client.get(f"{BASE}/findings/VA-913").json()
+    assert finding["proof_receipts"][0]["evidence_health"] == "healthy"
+    run = client.get(f"{BASE}/assessment-runs/{receipt['run_id']}").json()
+    assert run["proof_health"]["healthy"] == 1
+    assert run["seal"]["proof_health"] == run["proof_health"]
+
+    # Legacy labels can be trusted only on the exact stream of the same run.
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_artifacts SET producer_command_run_id = NULL WHERE id = ?",
+            (artifact["id"],),
+        )
+    assert client.get(endpoint).json()["evidence_health"] == "missing"
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_artifacts SET producer_command_run_id = ? WHERE id = ?",
+            (command["id"], artifact["id"]),
+        )
+
+    path.write_bytes(b"X" * 70_000)
+    assert register_output()["sha256"] != command[f"{stream}_sha256"]
+    assert client.get(endpoint).json()["evidence_health"] == "stale"
+    path.unlink()
+    assert register_output()["present"] is False
+    assert client.get(endpoint).json()["evidence_health"] == "missing"
+
+
+@pytest.mark.parametrize("stored_path", ["~acme-vigil-missing/output.txt", "invalid\x00stream"])
+def test_unusable_historical_command_stream_is_stale(client, isolate_settings, stored_path):
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(client, slug="VA-916", stdout="A" * 70_000)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_command_runs SET stdout_artifact_ref = ? WHERE id = ?",
+            (stored_path, command["id"]),
+        )
+    proof = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["evidence_health"] == "stale"
+
+
+def test_command_stream_owner_survives_generic_registration(client, isolate_settings):
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(client, slug="VA-915", stdout="A" * 70_000)
+    path = command["stdout_artifact_ref"]
+    response = client.post(
+        f"{BASE}/command-runs",
+        json={
+            **_COMMAND_RUN_META, "command": "echo OK", "tool_name": "echo",
+            "agent_name": "VERIFY-1", "phase": "verify",
+            "stdout": "OK", "run_uuid": "separate-output",
+        },
+    )
+    assert response.status_code == 201, response.text
+    other = response.json()
+    conflict = client.post(
+        f"{BASE}/artifacts",
+        json={"path": path, "kind": "proof", "producer_command_run_id": other["id"]},
+    )
+    assert conflict.status_code == 409, conflict.text
+    proof = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert proof.json()["evidence_health"] == "healthy"
+
+    # Actual capture can reuse a pathname. Once a later run owns those bytes,
+    # the older receipt must accurately report that its artifact is missing.
+    reused = client.post(
+        f"{BASE}/command-runs",
+        json={
+            **_COMMAND_RUN_META, "command": "echo OK", "tool_name": "echo",
+            "agent_name": "VERIFY-1", "phase": "verify",
+            "stdout": "OK", "stdout_path": path, "run_uuid": "shared-output",
+        },
+    )
+    assert reused.status_code == 201, reused.text
+    assert client.get(f"{BASE}/proof-receipts/{receipt['id']}").json()["evidence_health"] == "missing"
+
+
+def test_command_stream_cannot_borrow_a_relabelled_sibling(client, isolate_settings):
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(client, slug="VA-914", stdout="A" * 70_000)
+    recorded = Path(command["stdout_artifact_ref"])
+    sibling = recorded.with_name("other-evidence.txt")
+    recorded.rename(sibling)
+    other = client.post(
+        f"{BASE}/artifacts",
+        json={"path": str(sibling), "kind": "evidence", "producer_command_run_id": command["id"]},
+    )
+    assert other.status_code == 201, other.text
+    recorded.symlink_to(sibling)
+
+    proof = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["evidence_health"] == "stale"
+
+
 def test_command_receipt_health_checks_output_artifact_without_manual_refresh(
     client, isolate_settings
 ) -> None:
@@ -1331,6 +1447,50 @@ def test_assessment_runs_have_explicit_terminal_transitions_and_point_reads(
     )
 
 
+def test_measured_empty_command_checks_each_retained_file(client, isolate_settings):
+    root = _seed(client, isolate_settings)
+    stdout, stderr = root / "sample.out", root / "sample.err"
+    stdout.touch()
+    stderr.touch()
+    run = _run(client)
+    command = client.post(f"{BASE}/command-runs", json={
+        **_COMMAND_RUN_META, "command": "true", "tool_name": "true",
+        "agent_name": "VERIFY-1", "phase": "verify", "run_uuid": "empty-files",
+        "stdout_path": str(stdout), "stderr_path": str(stderr),
+    })
+    assert command.status_code == 201, command.text
+    assert command.json()["output_retention_status"] == "empty"
+    receipt = client.post(f"{BASE}/proof-receipts", json={
+        "run_id": run["id"], "evidence_kind": "command",
+        "command_run_id": command.json()["id"], "observed_result": "No output.",
+    })
+    assert receipt.status_code == 201, receipt.text
+    assert receipt.json()["evidence_health"] == "healthy"
+    endpoint = f"{BASE}/proof-receipts/{receipt.json()['id']}"
+
+    stdout.write_bytes(b"new output")
+    assert client.get(endpoint).json()["evidence_health"] == "stale"
+    stdout.write_bytes(b"")
+    stderr.unlink()
+    assert client.get(endpoint).json()["evidence_health"] == "missing"
+
+
+@pytest.mark.parametrize("retention", ["empty", "suppressed"])
+def test_receipt_without_retained_files_accepts_recorded_disposition(client, isolate_settings, retention):
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(client, slug="VA-917", stdout="")
+    assert command["output_retention_status"] == "empty"
+    if retention == "suppressed":
+        with db_module.get_connection() as connection:
+            connection.execute(
+                "UPDATE assessment_command_runs SET output_retention_status = 'suppressed' "
+                "WHERE id = ?", (command["id"],),
+            )
+    response = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["evidence_health"] == "healthy"
+
+
 def test_a_measured_empty_stderr_file_still_proves_the_command_output(
     client, isolate_settings
 ) -> None:
@@ -1401,6 +1561,8 @@ def test_a_measured_empty_stderr_file_still_proves_the_command_output(
     # A stderr file that GREW past the measured zero bytes is a different fact,
     # and stays degraded.
     stderr_path.write_text("boom\n", encoding="utf-8")
+    before_refresh = client.get(f"{BASE}/proof-receipts/{receipt.json()['id']}")
+    assert before_refresh.json()["evidence_health"] == "stale"
     grown_refresh = client.post(f"{BASE}/artifacts/refresh")
     assert grown_refresh.status_code == 200, grown_refresh.text
     grown = client.get(f"{BASE}/proof-receipts/{receipt.json()['id']}")
