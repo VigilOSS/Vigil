@@ -625,6 +625,14 @@ class AssessmentClient:
                 if accept_409 and resp.status == 409:
                     return resp.status, resp_body
 
+                # An explicit cooldown is longer-lived than this immediate retry
+                # loop. Surface it to the caller before starting the same work again.
+                retry_after = resp.getheader("Retry-After") if retry_safe and resp.status == 503 else None
+                if retry_after:
+                    raise AssessError(
+                        f"HTTP 503 (Retry-After: {retry_after}):\n"
+                        f"{resp_body.decode('utf-8', errors='replace')}"
+                    )
                 if retry_safe and resp.status in self.RETRYABLE_STATUSES and attempt < retries - 1:
                     self._reset_conn()
                     time.sleep(self.BACKOFF_BASE * (2 ** attempt))

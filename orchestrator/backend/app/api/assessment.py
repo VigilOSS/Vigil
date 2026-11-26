@@ -13,6 +13,7 @@ import typing
 from typing import Annotated, Any, Literal, TypeVar
 
 import anyio
+from anyio import to_process
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import (
     BaseModel,
@@ -27,6 +28,8 @@ from pydantic import (
 )
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
+from .. import db
+from ..aggregate_reads import DepthProjection, depth_projection_bytes
 from ..models.engagement import Engagement
 from ..retry_state import RETRY_STATES
 from ..services import activity as activity_service
@@ -82,11 +85,7 @@ from ..services.state_manager.coverage import (
     request_variant_position,
 )
 from ..services.state_manager.coverage_readiness import surface_is_open
-# by_family_coverage lives in the depth_ledger submodule (it reuses the ledger's
-# per-unit scope/expected/covered helpers); the package re-exports the
-# ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
-# it is imported directly from the submodule rather than via ``state_manager``.
-from ..services.state_manager.depth_ledger import by_family_coverage
+from ..services.state_manager.phase_readiness import phase_includes_depth
 # Client bindings are a dispatch-package concern that postdates the package's
 # ``__init__`` re-export list; imported from the submodule (as coverage,
 # depth_ledger, and http_flows above are) rather than widening that list.
@@ -2025,10 +2024,10 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     return payload
 
 
-@router.get("/coverage-readiness/by-family")
-def get_by_family_coverage(
+@router.get("/coverage-readiness/by-family", response_model=dict[str, Any])
+async def get_by_family_coverage(
     engagement_key: str, host: str = "", path_prefix: str = "",
-) -> dict[str, Any]:
+) -> Response:
     """A1 — engagement-wide (application-unit × vuln-family) coverage grid.
 
     Complements ``/coverage-readiness/by-host`` (per-host recon outcomes) with a
@@ -2040,11 +2039,23 @@ def get_by_family_coverage(
     ``host`` (case-insensitive) and ``path_prefix`` (exact) select units; totals
     then count only those units and the payload echoes the filter as ``scope``.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    with state_manager.get_connection() as connection:
-        return by_family_coverage(
-            connection, engagement.id, host=host, path_prefix=path_prefix
-        )
+    return await _depth_response(engagement_key, "by-family", host, path_prefix)
+
+
+async def _depth_response(
+    engagement_key: str, projection: DepthProjection,
+    host: str = "", path_prefix: str = "", phase: str = "",
+) -> Response:
+    def inputs():
+        engagement = get_engagement_or_404(engagement_key)
+        return db.read_worker_database(), engagement.id
+
+    fingerprint, engagement_id = await anyio.to_thread.run_sync(inputs)
+    body = await to_process.run_sync(
+        depth_projection_bytes, fingerprint, engagement_id, projection, host, path_prefix, phase,
+        cancellable=True,
+    )
+    return Response(body, media_type="application/json")
 
 
 _READINESS_RESPONSE = TypeAdapter(dict[str, Any])
@@ -2073,8 +2084,8 @@ def get_report_readiness(engagement_key: str) -> Response:
     return Response(_READINESS_RESPONSE.dump_json(readiness), media_type="application/json")
 
 
-@router.get("/phase-readiness")
-def get_phase_readiness(engagement_key: str, phase: str) -> dict[str, Any]:
+@router.get("/phase-readiness", response_model=dict[str, Any])
+async def get_phase_readiness(engagement_key: str, phase: str) -> Response:
     """Consolidated phase-keyed readiness.
 
     The backend half of ``vigil assess check-phase-readiness --phase <phase>``.
@@ -2087,11 +2098,18 @@ def get_phase_readiness(engagement_key: str, phase: str) -> dict[str, Any]:
     transition (the terminal depth block lives on the ``transition-phase``
     report/complete precondition). An unknown ``phase`` is a 422.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    try:
-        return state_manager.phase_readiness(engagement.id, phase)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if phase_includes_depth(phase):
+        return await _depth_response(engagement_key, "phase-readiness", phase=phase)
+
+    def read():
+        engagement = get_engagement_or_404(engagement_key)
+        try:
+            result = state_manager.phase_readiness(engagement.id, phase)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return Response(_READINESS_RESPONSE.dump_json(result), media_type="application/json")
+
+    return await anyio.to_thread.run_sync(read)
 
 
 class HostLivenessRow(BaseModel):
@@ -4227,7 +4245,7 @@ async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> 
         source_name=request.source_name,
         rationale=request.rationale,
         evidence_ref=request.evidence_ref,
-        status_value=request.status,
+        status_value=request.status if "status" in request.model_fields_set else None,
         framework_registration=request.framework_registration,
     )
     record = _with_open_flag(record)
@@ -4322,8 +4340,8 @@ def get_application_units(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_application_units(engagement.id)
 
 
-@router.get("/application-units/depth-ledger")
-def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
+@router.get("/application-units/depth-ledger", response_model=dict[str, Any])
+async def get_depth_ledger(engagement_key: str) -> Response:
     """Read-only, advisory depth ledger.
 
     Per ``deep_required`` app unit: Expected vuln classes (each gated by an
@@ -4335,12 +4353,11 @@ def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
     endpoint never returns non-2xx for missing depth. The terminal backstop is a
     separate projection. WEB-ONLY: code/blue engagements get a skipped result.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    return state_manager.depth_ledger(engagement.id)
+    return await _depth_response(engagement_key, "depth-ledger")
 
 
-@router.get("/application-units/terminal-block")
-def get_terminal_depth_block(engagement_key: str) -> dict[str, Any]:
+@router.get("/application-units/terminal-block", response_model=dict[str, Any])
+async def get_terminal_depth_block(engagement_key: str) -> Response:
     """The one terminal depth blocker.
 
     Read-only. Returns the units that BLOCK the terminal ``report``/``complete``
@@ -4355,8 +4372,7 @@ def get_terminal_depth_block(engagement_key: str) -> dict[str, Any]:
     ``blocking`` list into the hard transition block. WEB-ONLY: code/blue get
     ``skipped=True`` with empty ``blocking`` (reuses the ledger's web-only skip).
     """
-    engagement = get_engagement_or_404(engagement_key)
-    return state_manager.terminal_depth_block(engagement.id)
+    return await _depth_response(engagement_key, "terminal-block")
 
 
 @router.post("/application-units/score")

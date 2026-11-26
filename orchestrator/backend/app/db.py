@@ -1596,6 +1596,37 @@ def _verify_database_fingerprint() -> Path:
     return db_path
 
 
+def read_worker_database() -> DatabaseFingerprint:
+    """Bind an isolated reader to the database initialized by this server."""
+    _verify_database_fingerprint()
+    return _require_startup_database_fingerprint()
+
+
+@contextmanager
+def projection_database(expected: DatabaseFingerprint, *, writable: bool) -> Iterator[sqlite3.Connection]:
+    """Bind nested service reads in an isolated process to the server's SQLite file.
+
+    Terminal depth refreshes the derived application-unit scores in its normal
+    transaction. Other projections share one read-only WAL snapshot.
+    """
+    mode = "rw" if writable else "ro"
+    with closing(sqlite3.connect(f"{expected.path.as_uri()}?mode={mode}", uri=True)) as connection:
+        if _database_fingerprint(expected.path) != expected:
+            raise RuntimeError("Orchestrator database file changed after startup")
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        if not writable:
+            connection.execute("BEGIN")
+        _thread_connections.projection = (expected, connection)
+        _thread_connections.depth = 0 if writable else 1
+        try:
+            yield connection
+        finally:
+            del _thread_connections.projection
+            _thread_connections.depth = 0
+
+
 def database_cache_token() -> tuple[str, int, int, int]:
     fingerprint = _require_startup_database_fingerprint()
     return (
@@ -6223,8 +6254,13 @@ def database_readiness_flags(connection: sqlite3.Connection) -> dict[str, bool]:
 
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
-    db_path = _verify_database_fingerprint()
-    connection = _connection_for_thread(db_path)
+    worker = getattr(_thread_connections, "projection", None)
+    if worker is None:
+        connection = _connection_for_thread(_verify_database_fingerprint())
+    else:
+        expected, connection = worker
+        if _database_fingerprint(expected.path) != expected:
+            raise RuntimeError("Orchestrator database file changed after startup")
     depth = getattr(_thread_connections, "depth", 0)
     _thread_connections.depth = depth + 1
     try:

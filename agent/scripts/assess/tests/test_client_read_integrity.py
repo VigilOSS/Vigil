@@ -302,3 +302,26 @@ def test_no_content_engagement_delete_remains_supported(monkeypatch):
         body=None,
         headers={},
     )
+
+
+def test_read_with_service_retry_after_returns_the_deadline_without_resubmitting(monkeypatch):
+    client, connection, response = _stubbed_client(monkeypatch)
+    response.status = 503
+    response.getheader.return_value = "60"
+    response.read.return_value = b'{"detail":"Depth projection deadline exceeded"}'
+    monkeypatch.setattr("assess.lib.client.time.sleep", lambda _seconds: None)
+    with pytest.raises(AssessError, match="Depth projection deadline exceeded"):
+        client.get("coverage-readiness/by-family")
+    assert connection.request.call_count == 1
+
+
+def test_read_retries_transient_service_error_without_retry_after(monkeypatch):
+    client, connection, response = _stubbed_client(monkeypatch)
+    response.status = 503
+    response.getheader.return_value = None
+    success = Mock(spec=http.client.HTTPResponse, status=200)
+    success.read.return_value = b'{"units":[]}'
+    connection.getresponse.side_effect = [response, success]
+    monkeypatch.setattr("assess.lib.client.time.sleep", lambda _seconds: None)
+    assert client.get("coverage-readiness/by-family") == {"units": []}
+    assert connection.request.call_count == 2

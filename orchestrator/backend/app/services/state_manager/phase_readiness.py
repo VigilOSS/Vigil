@@ -378,13 +378,18 @@ def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
     if normalized in PHASE_EXPECTED_STAGES:
         out["stage_audit"] = stage_completion_audit(engagement_id, normalized)
 
-    if normalized in ("consume-test", "verify"):
+    if phase_includes_depth(normalized):
         out["depth_ledger"] = depth_ledger(engagement_id)
 
     if normalized in ("recon", "consume-test"):
         out["intel"] = _intel_readiness(engagement_id)
 
     return out
+
+
+def phase_includes_depth(phase: str) -> bool:
+    raw = phase.strip().lower()
+    return PHASE_INPUT_ALIASES.get(raw, raw) in ("consume-test", "verify")
 
 
 def _normalize_phase(phase: str) -> str:

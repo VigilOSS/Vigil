@@ -595,7 +595,7 @@ def _upsert_surface(
     source_name: str,
     rationale: str,
     evidence_ref: str,
-    status_value: str,
+    status_value: str | None,
     framework_registration: str,
 ) -> dict[str, Any]:
     connection.execute(
@@ -616,8 +616,10 @@ def _upsert_surface(
             ),
             -- Re-observation enriches the row; status changes require PATCH.
             updated_at = CURRENT_TIMESTAMP
+        WHERE ? IS NULL OR assessment_surfaces.status = excluded.status
         """,
-        (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value, framework_registration),
+        (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref,
+         status_value or "discovered", framework_registration, status_value),
     )
     row = connection.execute(
         """
@@ -628,6 +630,15 @@ def _upsert_surface(
         (engagement_id, surface_type, target_descriptor),
     ).fetchone()
     assert row is not None
+    if status_value is not None and status_value != row["status"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Surface {row['id']} already has status {row['status']!r}. "
+                "Omit status to record an observation, or change the disposition "
+                f"with PATCH /surfaces/{row['id']} and a rationale."
+            ),
+        )
     return dict(row)
 
 def _service_fields_from_url(url: str) -> tuple[str, str, int, str]:
@@ -2681,7 +2692,7 @@ def record_surface(
     source_name: str,
     rationale: str,
     evidence_ref: str,
-    status_value: str,
+    status_value: str | None,
     framework_registration: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)

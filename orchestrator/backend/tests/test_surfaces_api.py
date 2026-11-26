@@ -872,3 +872,29 @@ def test_coverage_readiness_counts_the_surfaces_it_judged(client, isolate_settin
     _create_surface(client)
     judged = client.get(f"{ASSESSMENT_BASE}/coverage-readiness").json()
     assert judged["surface_count"] == 1
+
+
+def test_surface_status_conflict_is_atomic_and_retryable(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    url = f"{ASSESSMENT_BASE}/surfaces"
+    observation = {
+        "surface_type": "informational",
+        "target_descriptor": "https://acme.example/catalog",
+        "source_name": "catalog",
+        "rationale": "First observation",
+        "status": "covered",
+    }
+    initial = client.post(url, json=observation)
+    assert initial.status_code == 201
+    assert initial.json()["status"] == "covered"
+    conflicting = dict(observation, status="discovered", rationale="New context")
+    for _ in range(2):
+        response = client.post(url, json=conflicting)
+        assert response.status_code == 409, response.text
+        assert str(initial.json()["id"]) in response.json()["detail"]
+    assert client.get(url).json() == [initial.json()]
+
+    same_status = client.post(url, json=dict(observation, rationale="New context"))
+    assert same_status.status_code == 201
+    assert same_status.json()["id"] == initial.json()["id"]
+    assert same_status.json()["rationale"] == "First observation\nNew context"

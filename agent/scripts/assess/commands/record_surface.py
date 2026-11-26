@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import os
 
-from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.client import AssessError, AssessmentClient, require_write_result
 from assess.lib.config import load_config
 from assess.lib.contracts import FRAMEWORK_REGISTRATION_KINDS
-from assess.lib.surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
+from assess.lib.surfaces import CREATABLE_STATUSES, VALID_STATUSES, VALID_SURFACE_TYPES
 
 
 def register(subparsers) -> None:
@@ -18,7 +18,7 @@ def register(subparsers) -> None:
     p.add_argument("source", help="Source agent or process name")
     p.add_argument("--rationale", default="", help="Rationale for the surface")
     p.add_argument("--evidence-ref", default="", help="Evidence reference")
-    p.add_argument("--status", default="discovered", help=f"Surface status ({valid_statuses})")
+    p.add_argument("--status", help=f"Initial surface status ({valid_statuses}). Omit to preserve an existing disposition.")
     p.add_argument(
         "--framework-registration",
         choices=tuple(FRAMEWORK_REGISTRATION_KINDS),
@@ -37,7 +37,8 @@ def register(subparsers) -> None:
 def run(args) -> None:
     from assess.lib.surfaces import validate_surface_create_status, validate_surface_type
     validate_surface_type(args.type)
-    validate_surface_create_status(args.status)
+    if args.status is not None:
+        validate_surface_create_status(args.status)
 
     cfg = load_config(args.engagement_dir)
 
@@ -47,8 +48,9 @@ def run(args) -> None:
         "source_name": args.source,
         "rationale": args.rationale,
         "evidence_ref": args.evidence_ref,
-        "status": args.status,
     }
+    if args.status is not None:
+        payload["status"] = args.status
     # Omitted means "not a framework registration", and the backend upsert reads
     # an absent key as "leave whatever is recorded alone". Sending an empty value
     # would be indistinguishable but noisier on the wire, so only a real kind
@@ -58,24 +60,25 @@ def run(args) -> None:
         payload["framework_registration"] = framework_registration
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        require_write_result(
+        expected = {"surface_type": args.type, "target_descriptor": args.target}
+        if args.status is not None:
+            expected["status"] = args.status
+        record = require_write_result(
             client.post("surfaces", payload),
             operation="record surface",
-            expected={
-                "surface_type": args.type,
-                "target_descriptor": args.target,
-                "status": args.status,
-            },
+            expected=expected,
             positive_ids=("id",),
         )
 
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        stored_status = record.get("status")
+        if not isinstance(stored_status, str) or stored_status not in VALID_STATUSES:
+            raise AssessError("record surface: invalid status in write response; inspect durable state before retrying")
         client.post_event({
             "event_type": "surface.updated",
             "phase": os.environ.get("ORCHESTRATOR_PHASE", "unknown"),
             "task_name": args.type,
             "agent_name": args.source,
-            "summary": f"{args.type} {args.status}: {args.target}",
+            "summary": f"{args.type} {stored_status}: {args.target}",
         })
 
-    print(f"Recorded surface: {args.type} {args.target}")
+    print(f"Recorded surface: {args.type} {args.target} (id={record['id']}, status={stored_status})")

@@ -86,3 +86,37 @@ def test_initialization_closes_connections_and_preserves_transaction_outcome(
     with closing(sqlite3.connect(path)) as connection:
         rows = connection.execute("SELECT value FROM lifecycle_probe").fetchall()
     assert rows == ([] if migration_fails else [("persisted",)])
+
+
+def test_read_worker_and_nested_service_reads_share_a_read_only_wal_snapshot(isolate_settings):
+    db.init_db()
+    fingerprint = db.read_worker_database()
+    with db.get_connection() as connection:
+        connection.execute("CREATE TABLE report_sample (value INTEGER)")
+        connection.execute("INSERT INTO report_sample VALUES (1)")
+
+    with db.projection_database(fingerprint, writable=False) as report:
+        assert report.execute("SELECT value FROM report_sample").fetchone()[0] == 1
+        with closing(sqlite3.connect(fingerprint.path)) as writer:
+            writer.execute("UPDATE report_sample SET value = 2")
+            writer.commit()
+        with db.get_connection() as nested:
+            assert nested.execute("SELECT value FROM report_sample").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                nested.execute("UPDATE report_sample SET value = 3")
+
+    _assert_closed(report)
+    with db.get_connection() as connection:
+        assert connection.execute("SELECT value FROM report_sample").fetchone()[0] == 2
+
+
+def test_read_worker_refuses_a_database_replaced_since_startup(isolate_settings):
+    db.init_db()
+    fingerprint = db.read_worker_database()
+    fingerprint.path.rename(fingerprint.path.with_suffix(".original"))
+    with closing(sqlite3.connect(fingerprint.path)) as replacement:
+        replacement.execute("CREATE TABLE replacement (value INTEGER)")
+
+    with pytest.raises(RuntimeError, match="database file changed"):
+        with db.projection_database(fingerprint, writable=False):
+            pytest.fail("worker opened the replacement")

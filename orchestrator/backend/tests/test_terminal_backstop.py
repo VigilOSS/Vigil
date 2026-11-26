@@ -22,8 +22,16 @@ escape valves, the recon->report walk) is covered by ``test_vigil_cli.py``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
+from contextlib import closing
 
+import httpx
+import pytest
+
+from app import db
+from app.main import app
 from app.services import state_manager
 from tests.test_engagements_api import write_engagement
 
@@ -259,6 +267,57 @@ def test_terminal_block_scores_app_units_even_if_never_scored(client, isolate_se
     api_units = [b for b in result["blocking"] if b["unit"]["host"] == "api.example.com"]
     assert api_units, f"backstop must score-then-read; got {result}"
     assert state_manager.list_application_units(eng_id), "score must have persisted units"
+
+
+def test_cancelling_terminal_score_rolls_back_before_retry(client, isolate_settings):
+    key = "2026-06-09-210099-cancel-score"
+    eng_id = _seed_high_conf_api(client, isolate_settings, key)
+    endpoint = f"/engagements/{key}/assessment/application-units/terminal-block"
+    database = db.database_path()
+    # Hold the real scorer inside its transaction, after it has inserted a unit.
+    with db.get_connection() as connection:
+        connection.execute("""
+            CREATE TRIGGER hold_score AFTER INSERT ON assessment_application_units
+            BEGIN
+                SELECT (
+                    WITH RECURSIVE spin(n) AS (
+                        VALUES(0) UNION ALL SELECT n + 1 FROM spin WHERE n < 100000000
+                    ) SELECT max(n) FROM spin
+                );
+            END
+        """)
+
+    async def cancel_during_write():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://acme.example") as http:
+            pending = asyncio.create_task(http.get(endpoint))
+            try:
+                with closing(sqlite3.connect(database, timeout=0)) as probe:
+                    async with asyncio.timeout(10):
+                        while not pending.done():
+                            try:
+                                probe.execute("BEGIN IMMEDIATE")
+                            except sqlite3.OperationalError as exc:
+                                assert exc.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                                break
+                            probe.rollback()
+                            await asyncio.sleep(0.02)
+                assert not pending.done(), "scorer returned before the cancellation"
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            finally:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+    asyncio.run(cancel_during_write())
+    assert state_manager.list_application_units(eng_id) == []
+    with db.get_connection() as connection:
+        connection.execute("DROP TRIGGER hold_score")
+    retried = client.get(endpoint)
+    assert retried.status_code == 200, retried.text
+    assert state_manager.list_application_units(eng_id)
+    assert retried.json() == state_manager.terminal_depth_block(eng_id)
 
 
 def test_surface_only_decisive_host_materializes_and_blocks(client, isolate_settings):

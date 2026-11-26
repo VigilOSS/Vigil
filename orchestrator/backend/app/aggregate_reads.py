@@ -18,30 +18,41 @@ body byte for byte.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import weakref
 from dataclasses import dataclass, field
+from typing import Any, Literal
 from urllib.parse import parse_qsl
 
 from anyio import to_thread
+from pydantic import TypeAdapter
+from starlette.datastructures import QueryParams
+from starlette.responses import JSONResponse
 from starlette.routing import compile_path
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from . import db
+from .services.state_manager.phase_readiness import phase_includes_depth
 
 _ASSESSMENT = "/engagements/{engagement_key}/assessment"
 
 # Route templates (as registered) whose GET handlers compute an engagement-wide
 # aggregate. `/summary` is not listed: it already single-flights its build
 # without holding a worker (`assessment_summary_async`).
-AGGREGATE_READ_ROUTES = frozenset({
+_DEPTH_READ_ROUTES = frozenset({
+    f"{_ASSESSMENT}/coverage-readiness/by-family",
+    f"{_ASSESSMENT}/application-units/depth-ledger",
+    f"{_ASSESSMENT}/application-units/terminal-block",
+})
+
+AGGREGATE_READ_ROUTES = _DEPTH_READ_ROUTES | frozenset({
     f"{_ASSESSMENT}/coverage-readiness",
     f"{_ASSESSMENT}/coverage-readiness/by-host",
-    f"{_ASSESSMENT}/coverage-readiness/by-family",
     f"{_ASSESSMENT}/report-readiness",
     f"{_ASSESSMENT}/phase-readiness",
     f"{_ASSESSMENT}/resume-brief",
-    f"{_ASSESSMENT}/application-units/depth-ledger",
-    f"{_ASSESSMENT}/application-units/terminal-block",
     f"{_ASSESSMENT}/code/readiness",
     f"{_ASSESSMENT}/code/coverage",
     f"{_ASSESSMENT}/code/coverage/by-path",
@@ -50,6 +61,39 @@ AGGREGATE_READ_ROUTES = frozenset({
 })
 
 DEFAULT_AGGREGATE_READ_WORKERS = 3
+DEPTH_READ_TIMEOUT_SECONDS = 60.0
+_DEPTH_PATHS = tuple(compile_path(route)[0] for route in _DEPTH_READ_ROUTES)
+
+
+_PHASE_PATH = compile_path(f"{_ASSESSMENT}/phase-readiness")[0]
+DepthProjection = Literal["by-family", "depth-ledger", "terminal-block", "phase-readiness"]
+_DEPTH_RESPONSE = TypeAdapter(dict[str, Any])
+
+
+def depth_projection_bytes(
+    database: db.DatabaseFingerprint, engagement_id: int, projection: DepthProjection,
+    host: str, path_prefix: str, phase: str,
+) -> bytes:
+    """Run the canonical service and its JSON rendering in a cancellable worker."""
+    from .services import state_manager
+    from .services.state_manager.depth_ledger import by_family_coverage
+
+    with db.projection_database(database, writable=projection == "terminal-block") as connection:
+        if projection == "by-family":
+            result = by_family_coverage(connection, engagement_id, host=host, path_prefix=path_prefix)
+        elif projection == "terminal-block":
+            result = state_manager.terminal_depth_block(engagement_id)
+        elif projection == "phase-readiness":
+            result = state_manager.phase_readiness(engagement_id, phase)
+        else:
+            result = state_manager.depth_ledger(engagement_id)
+        return _DEPTH_RESPONSE.dump_json(result)
+
+
+def _depth_read(scope: Scope) -> bool:
+    if _PHASE_PATH.match(scope["path"]):
+        return phase_includes_depth(QueryParams(scope.get("query_string", b"")).get("phase", ""))
+    return any(pattern.match(scope["path"]) for pattern in _DEPTH_PATHS)
 
 
 def aggregate_read_budget(pool_tokens: int) -> int:
@@ -97,19 +141,18 @@ def _flight_key(scope: Scope) -> FlightKey:
     )
 
 
-@dataclass(eq=False)
+@dataclass
 class _Flight:
-    done: asyncio.Event = field(default_factory=asyncio.Event)
-    # The response every request sharing this flight receives; None when the
-    # flight did not complete, and each of its joiners then runs on its own.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    started: int = 0
+    callers: int = 0
     messages: list[Message] | None = None
 
 
-@dataclass(eq=False)
+@dataclass
 class _LoopState:
     budget: asyncio.Semaphore
-    running: dict[FlightKey, _Flight] = field(default_factory=dict)
-    queued: dict[FlightKey, _Flight] = field(default_factory=dict)
+    flights: dict[FlightKey, _Flight] = field(default_factory=dict)
 
 
 class AggregateReadMiddleware:
@@ -129,7 +172,24 @@ class AggregateReadMiddleware:
         if not is_aggregate_read(scope):
             await self.app(scope, receive, send)
             return
-        for message in await self._coalesced(self._state(), _flight_key(scope), scope, receive):
+        # Include queue time in the deadline. The projection itself runs in a
+        # cancellable process so expiry also stops SQL and Python CPU work.
+        deadline = DEPTH_READ_TIMEOUT_SECONDS if _depth_read(scope) else None
+        timeout = asyncio.timeout(deadline)
+        try:
+            async with timeout:
+                messages = await self._coalesced(self._state(), _flight_key(scope), scope, receive)
+        except TimeoutError:
+            if deadline is None or not timeout.expired():
+                raise
+            response = JSONResponse(
+                {"detail": "Depth projection deadline exceeded"},
+                status_code=503,
+                headers={"Retry-After": str(max(1, math.ceil(deadline)))},
+            )
+            await response(scope, receive, send)
+            return
+        for message in messages:
             await send(message)
 
     def _state(self) -> _LoopState:
@@ -144,56 +204,24 @@ class AggregateReadMiddleware:
     async def _coalesced(
         self, state: _LoopState, key: FlightKey, scope: Scope, receive: Receive
     ) -> list[Message]:
-        running = state.running.get(key)
-        if running is None:
-            flight = _Flight()
-            state.running[key] = flight
-            return await self._lead(state, key, flight, scope, receive)
-        queued = state.queued.get(key)
-        if queued is not None:
-            await queued.done.wait()
-            if queued.messages is not None:
-                return queued.messages
-            return await self._run(state, scope, receive)
-        flight = _Flight()
-        state.queued[key] = flight
+        flight = state.flights.get(key)
+        if flight is None:
+            flight = state.flights[key] = _Flight()
+        started_at_arrival = flight.started
+        flight.callers += 1
         try:
-            # The running flight started before this request arrived; its
-            # finish promotes this one to running.
-            await running.done.wait()
-        except BaseException:
-            self._abandon(state, key, flight)
-            raise
-        return await self._lead(state, key, flight, scope, receive)
-
-    async def _lead(
-        self, state: _LoopState, key: FlightKey, flight: _Flight, scope: Scope, receive: Receive
-    ) -> list[Message]:
-        try:
-            flight.messages = await self._run(state, scope, receive)
-            return flight.messages
+            async with flight.lock:
+                # Share a successful read only if it started after this caller
+                # arrived. A cancelled or failed read leaves no result to share.
+                if flight.started == started_at_arrival or flight.messages is None:
+                    flight.started += 1
+                    flight.messages = None
+                    flight.messages = await self._run(state, scope, receive)
+                return flight.messages
         finally:
-            self._finish(state, key, flight)
-
-    @staticmethod
-    def _finish(state: _LoopState, key: FlightKey, flight: _Flight) -> None:
-        """Hand the key to the flight queued behind *flight*, then release its joiners."""
-        if state.running.get(key) is flight:
-            successor = state.queued.pop(key, None)
-            if successor is None:
-                del state.running[key]
-            else:
-                state.running[key] = successor
-        flight.done.set()
-
-    def _abandon(self, state: _LoopState, key: FlightKey, flight: _Flight) -> None:
-        """A queued leader was cancelled: its joiners run on their own."""
-        if state.queued.get(key) is flight:
-            del state.queued[key]
-            flight.done.set()
-        else:
-            # Already promoted to running: pass the key on as a finish would.
-            self._finish(state, key, flight)
+            flight.callers -= 1
+            if not flight.callers:
+                del state.flights[key]
 
     async def _run(self, state: _LoopState, scope: Scope, receive: Receive) -> list[Message]:
         messages: list[Message] = []

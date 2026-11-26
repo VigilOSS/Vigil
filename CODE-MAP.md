@@ -169,7 +169,9 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   (`AGGREGATE_READ_ROUTES`: readiness, coverage, by-family/by-host, depth ledger, resume brief), their
   worker budget (`VIGIL_BACKEND_AGGREGATE_READS`, default 3, capped one below `VIGIL_BACKEND_THREADPOOL`) and
   single-flight coalescing: a request arriving mid-flight shares the next flight, never an earlier answer.
-  `main.py` registers the middleware inside request diagnostics. See: `test_aggregate_read_limiter.py`.
+  `depth_projection_bytes` isolates depth reads in cancellable processes bound to a database fingerprint.
+  The 60-second deadline includes admission and execution. `main.py` registers the middleware inside request diagnostics.
+  See `test_aggregate_read_limiter.py` and `test_terminal_backstop.py`.
 - `orchestrator/backend/app/json_response.py` owns lossless JSON escaping for validation errors
   and the activity API; activity response models validate Python values before transport rendering.
 - `services/activity_feed.py:get_activity_entry` owns `GET /engagements/{key}/activity/{entry_id}` (`audit:<id>` or

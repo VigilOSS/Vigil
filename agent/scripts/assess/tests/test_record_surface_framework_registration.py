@@ -139,3 +139,28 @@ def test_record_surface_is_discoverable_in_the_code_phases_that_use_it():
     assert {"code-classify", "code-hunt"} <= phases
     # The web phases it already served must stay.
     assert {"recon", "collect", "consume-test", "exploit"} <= phases
+
+
+def test_reobserving_without_status_reports_the_stored_status(client, tmp_path, monkeypatch, capsys):
+    args = _parser().parse_args(["record-surface", "auth_entry", "acme.example", "catalog"])
+    args.engagement_dir = str(tmp_path)
+
+    def reobserve(_endpoint, payload):
+        assert payload.get("status") is None
+        return {"id": 1, "surface_type": "auth_entry", "target_descriptor": "acme.example",
+                "status": "covered"}
+
+    monkeypatch.setattr(client, "post", reobserve)
+    record_surface.run(args)
+    assert client.events[0]["summary"] == "auth_entry covered: acme.example"
+    output = capsys.readouterr().out
+    assert "id=1" in output and "status=covered" in output
+
+
+@pytest.mark.parametrize("status_fields", [{}, {"status": "unknown"}, {"status": ["covered"]}])
+def test_reobservation_refuses_an_invalid_stored_status(client, tmp_path, monkeypatch, status_fields):
+    returned = {"id": 1, "surface_type": "auth_entry", "target_descriptor": "acme.example", **status_fields}
+    monkeypatch.setattr(client, "post", lambda *_: returned)
+    with pytest.raises(record_surface.AssessError, match="inspect durable state"):
+        record_surface.run(_args(tmp_path, target="acme.example", status=None))
+    assert client.events == []
