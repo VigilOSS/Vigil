@@ -165,12 +165,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   dispatch packets, launch continuations and `dispatch/handoff_renderer.py` share the immutable path and digest.
 - `code_analysis.py:list_queue_items` and `list_code_files` own exact selected-item/path reads for
   dispatch preparation; `state_manager/findings.py:count_findings` owns the ledger's count-only read.
-- `orchestrator/backend/app/aggregate_reads.py` owns the engagement-wide aggregate GET routes
-  (`AGGREGATE_READ_ROUTES`: readiness, coverage, by-family/by-host, depth ledger, resume brief), their
-  worker budget (`VIGIL_BACKEND_AGGREGATE_READS`, default 3, capped one below `VIGIL_BACKEND_THREADPOOL`) and
-  single-flight coalescing: a request arriving mid-flight shares the next flight, never an earlier answer.
-  `depth_projection_bytes` isolates depth reads in cancellable processes bound to a database fingerprint.
-  The 60-second deadline includes admission and execution. `main.py` registers the middleware inside request diagnostics.
+- `orchestrator/backend/app/aggregate_reads.py` owns the aggregate GET budget, coalescing and deadline.
+  `depth_projection_bytes` binds cancellable depth workers to the server's database. `main.py` registers the middleware.
   See `test_aggregate_read_limiter.py` and `test_terminal_backstop.py`.
 - `orchestrator/backend/app/json_response.py` owns lossless JSON escaping for validation errors
   and the activity API; activity response models validate Python values before transport rendering.
